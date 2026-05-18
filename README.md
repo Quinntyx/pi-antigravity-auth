@@ -1,44 +1,43 @@
 # pi-antigravity-auth
 
-Pi Coding Agent provider extension for Google Antigravity OAuth models, including Gemini CLI quota routing and multi-account rotation.
+Pi Coding Agent provider extension for Google Antigravity OAuth models, plus Gemini CLI quota routing and multi-account rotation.
 
-This package ports the useful parts of `opencode-antigravity-auth` into a native Pi extension/provider.
+> **Warning**
+>
+> This project uses Google OAuth credentials and local account tokens. It may affect provider quotas, account standing, or ToS compliance. Use at your own risk.
 
-## Features
+## What you get
 
-- Adds a `antigravity` provider to Pi.
-- Uses Google OAuth refresh tokens from `~/.pi/agent/antigravity-accounts.json`.
-- Imports existing `opencode-antigravity-auth` account pools.
-- Rotates accounts per request/turn.
-- Supports selection strategies: `round-robin`, `random`, `sticky`.
-- Supports both Gemini quota families:
+- Google OAuth sign-in with automatic token refresh
+- Dual quota system:
   - Antigravity quota
-  - Gemini CLI quota (separate quota; Gemini models only)
-- Can fallback between Gemini CLI and Antigravity quotas.
-- Supports Antigravity Claude models observed in current logs:
-  - `claude-sonnet-4-6`
-  - `claude-opus-4-6-thinking`
-- Supports Gemini 3 models and Gemini CLI preview names.
-- Registers Pi slash commands for account/config management.
+  - Gemini CLI quota (Gemini-only)
+- Multi-account rotation
+- Real-time SSE streaming with tool calls and thinking blocks
+- Variant-style thinking control
+- Automatic import from `opencode-antigravity-auth`
+- Native Pi provider integration
 
-## Install
+## Installation
 
-From GitHub:
+### For humans
 
 ```bash
 pi install git:github.com/WindowsRefundDay/pi-antigravity-auth
 ```
 
-Or test without installing:
-
-```bash
-pi --no-extensions -e git:github.com/WindowsRefundDay/pi-antigravity-auth --list-models antigravity
-```
-
-After installing, restart Pi or run:
+Then reload Pi:
 
 ```text
 /reload
+```
+
+### For an AI agent
+
+Paste this into an agent:
+
+```text
+Install pi-antigravity-auth from GitHub, enable the antigravity provider, and keep the existing README structure and config documentation consistent with the upstream Antigravity auth project.
 ```
 
 ## Models
@@ -49,7 +48,7 @@ List models:
 pi --list-models antigravity
 ```
 
-Common models matching the Antigravity model picker:
+Common models matching the Antigravity picker:
 
 ```bash
 pi --provider antigravity --model gemini-3.1-pro-high
@@ -60,7 +59,34 @@ pi --provider antigravity --model claude-opus-4-6-thinking
 pi --provider antigravity --model gpt-oss-120b-medium
 ```
 
-Additional Gemini CLI preview models are also registered to use the separate Gemini CLI quota. Run `pi --list-models antigravity` for the full list.
+Additional Gemini CLI preview models are also registered for the separate Gemini CLI quota.
+
+### Available models
+
+| Model | Notes |
+|---|---|
+| `gemini-3.1-pro-high` | Antigravity quota |
+| `gemini-3.1-pro-low` | Antigravity quota |
+| `gemini-3-flash` | Antigravity quota |
+| `claude-sonnet-4-6-thinking` | Antigravity quota |
+| `claude-opus-4-6-thinking` | Antigravity quota |
+| `gpt-oss-120b-medium` | Antigravity quota |
+| `gemini-3-pro-preview` | Gemini CLI quota |
+| `gemini-3-flash-preview` | Gemini CLI quota |
+| `gemini-cli-3-pro-preview` | Explicit Gemini CLI quota |
+| `gemini-cli-3-flash-preview` | Explicit Gemini CLI quota |
+
+## Model variants
+
+Variants let you change thinking mode/level per model.
+
+Examples:
+
+```bash
+pi --provider antigravity --model gemini-3.1-pro-high
+pi --provider antigravity --model gemini-3.1-pro-low
+pi --provider antigravity --model claude-opus-4-6-thinking
+```
 
 ## Accounts
 
@@ -84,25 +110,17 @@ to:
 ~/.pi/agent/antigravity-accounts.json
 ```
 
-The account file is gitignored automatically.
-
 ### Show accounts
 
 ```text
 /antigravity-accounts
 ```
 
-This prints emails only plus active rotation/config state.
-
 ### Login through Pi
-
-The provider also appears in Pi's login flow:
 
 ```text
 /login antigravity
 ```
-
-Complete the browser OAuth flow, then paste the redirect URL or code when prompted.
 
 ## Configuration
 
@@ -149,7 +167,7 @@ Set options:
 |---|---|---|
 | `accountSelectionStrategy` | `round-robin`, `random`, `sticky` | How to select accounts. |
 | `rotateAccounts` | `true`, `false` | Advance the active account after a successful request. |
-| `geminiQuota` | `auto`, `gemini-cli`, `antigravity` | Preferred Gemini quota family. Claude always uses Antigravity. |
+| `geminiQuota` | `auto`, `gemini-cli`, `antigravity` | Preferred Gemini quota family. |
 | `quotaFallback` | `true`, `false` | Try the other Gemini quota if the preferred quota fails/rate-limits. |
 | `quiet` | `true`, `false` | Reserved for future UI verbosity controls. |
 
@@ -161,24 +179,36 @@ Use Pi's package config UI:
 pi config
 ```
 
-Or temporarily start Pi without extensions:
+Disable locally by renaming the folder:
 
 ```bash
-pi --no-extensions
+mv ~/.pi/agent/extensions/antigravity-auth ~/.pi/agent/extensions/antigravity-auth.disabled
 ```
 
-Or test only this package:
+Re-enable:
 
 ```bash
-pi --no-extensions -e git:github.com/WindowsRefundDay/pi-antigravity-auth
+mv ~/.pi/agent/extensions/antigravity-auth.disabled ~/.pi/agent/extensions/antigravity-auth
 ```
+
+## Account storage
+
+- Stored in `~/.pi/agent/antigravity-accounts.json`
+- Contains OAuth refresh tokens - treat like a password
+- If Google revokes a token, that account is automatically removed
 
 ## Security notes
 
-- This package reads/writes OAuth account data under `~/.pi/agent/`.
-- Do **not** commit `antigravity-accounts.json` or `antigravity.json`.
-- Pi extensions run with local user privileges. Review code before installing any Pi package.
-- The Google OAuth client ID/secret used here are public desktop/installed-app credentials mirrored from the upstream Antigravity auth flow; user refresh tokens are the sensitive material and are stored only locally.
+- Do **not** commit `antigravity-accounts.json` or `antigravity.json`
+- Pi extensions run with local user privileges
+- Review code before installing any Pi package
+- OAuth client values mirror the upstream Antigravity desktop auth flow; the sensitive part is your refresh tokens
+
+## Troubleshoot
+
+- If `pi --list-models antigravity` fails, run `pi config` and ensure the package is enabled.
+- If an account stops working, re-auth with `/login antigravity`.
+- If you imported opencode accounts, use `/antigravity-import-opencode` again after updating the source file.
 
 ## Development
 
@@ -188,17 +218,12 @@ cd pi-antigravity-auth
 npm install
 npm run typecheck
 npm run test:list-models
-```
-
-Smoke test with your local account file:
-
-```bash
 npm run test:smoke
 ```
 
 ## Credits
 
-This extension depends on request/response transformation logic from [`opencode-antigravity-auth`](https://github.com/NoeFabris/opencode-antigravity-auth) and adapts it for Pi's provider API.
+This extension adapts request/response transformation logic from [`opencode-antigravity-auth`](https://github.com/NoeFabris/opencode-antigravity-auth) for Pi.
 
 ## License
 
