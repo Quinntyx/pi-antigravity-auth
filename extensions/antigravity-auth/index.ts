@@ -172,6 +172,7 @@ function textFromContent(content: any): string {
 function toContents(model: Model<any>, context: Context) {
   const contents: any[] = [];
   const needsId = model.id.startsWith("claude-") || model.id.startsWith("gpt-oss-");
+  const geminiReplay = isGeminiModel(model.id);
   for (const msg of context.messages) {
     if (msg.role === "user") {
       const parts = typeof msg.content === "string"
@@ -181,9 +182,19 @@ function toContents(model: Model<any>, context: Context) {
     } else if (msg.role === "assistant") {
       const parts: any[] = [];
       for (const b of msg.content) {
-        if (b.type === "text" && b.text?.trim()) parts.push({ text: b.text, ...(b.textSignature ? { thoughtSignature: b.textSignature } : {}) });
-        if (b.type === "thinking" && b.thinking?.trim() && msg.provider === model.provider && msg.model === model.id) parts.push({ thought: true, text: b.thinking, ...(b.thinkingSignature ? { thoughtSignature: b.thinkingSignature } : {}) });
-        if (b.type === "toolCall") parts.push({ functionCall: { name: b.name, args: b.arguments ?? {}, ...(needsId ? { id: b.id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64) } : {}) }, ...(b.thoughtSignature ? { thoughtSignature: b.thoughtSignature } : {}) });
+        if (b.type === "text" && b.text?.trim()) parts.push({ text: b.text });
+        if (b.type === "thinking" && b.thinking?.trim() && msg.provider === model.provider && msg.model === model.id) parts.push({ thought: true, text: b.thinking });
+        if (b.type === "toolCall") {
+          // Gemini 3 thought signatures are backend/model/quota scoped. Replaying a
+          // Gemini CLI signature against Antigravity (or vice versa) can produce
+          // `Corrupted thought signature`. The Cloud Code Assist backend accepts
+          // this sentinel for replayed function calls; opencode-antigravity-auth
+          // uses the same compatibility shim in its debug logs.
+          parts.push({
+            functionCall: { name: b.name, args: b.arguments ?? {}, ...(needsId ? { id: b.id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64) } : {}) },
+            ...(geminiReplay ? { thoughtSignature: "skip_thought_signature_validator" } : {}),
+          });
+        }
       }
       if (parts.length) contents.push({ role: "model", parts });
     } else if (msg.role === "toolResult") {
@@ -219,13 +230,15 @@ function resolveActualModel(id: string) {
     .replace(/claude-sonnet-4-5/g, "claude-sonnet-4-6")
     .replace(/claude-opus-4-5/g, "claude-opus-4-6")
     .replace(/claude-sonnet-4-6-thinking(?:-(low|medium|high))?$/g, "claude-sonnet-4-6")
-    .replace(/claude-opus-4-6-thinking-(low|medium|high)$/g, "claude-opus-4-6-thinking");
+    .replace(/claude-opus-4-6-thinking-(low|medium|high)$/g, "claude-opus-4-6-thinking")
+    .replace(/^claude-3-5-sonnet$/, "claude-sonnet-4-6")
+    .replace(/^claude-3-opus$/, "claude-opus-4-6-thinking");
 }
 function thinkingConfig(id: string, reasoning?: string) {
   const lower = id.toLowerCase();
   const level = reasoning === "high" || reasoning === "xhigh" ? "high" : reasoning === "medium" ? "medium" : "low";
   if (lower.includes("gemini-3")) return { includeThoughts: true, thinkingLevel: level.toUpperCase() };
-  if (lower.includes("claude") && lower.includes("thinking")) return { include_thoughts: true, thinking_budget: level === "high" ? 32768 : level === "medium" ? 16384 : 8192 };
+  if (lower.includes("claude") && (lower.includes("thinking") || lower.includes("claude-3"))) return { include_thoughts: true, thinking_budget: level === "high" ? 32768 : level === "medium" ? 16384 : 8192 };
   return undefined;
 }
 function buildRequestBody(model: Model<any>, context: Context, options?: SimpleStreamOptions) {
@@ -424,6 +437,8 @@ const models = [
   { id: "claude-opus-4-6-thinking-low", name: "Antigravity Claude Opus 4.6 Thinking Low", reasoning: true, contextWindow: 200000, maxTokens: 65536 },
   { id: "claude-opus-4-6-thinking-medium", name: "Antigravity Claude Opus 4.6 Thinking Medium", reasoning: true, contextWindow: 200000, maxTokens: 65536 },
   { id: "claude-opus-4-6-thinking-high", name: "Antigravity Claude Opus 4.6 Thinking High", reasoning: true, contextWindow: 200000, maxTokens: 65536 },
+  { id: "claude-3-5-sonnet", name: "Antigravity Claude 3.5 Sonnet", reasoning: true, contextWindow: 200000, maxTokens: 8192 },
+  { id: "claude-3-opus", name: "Antigravity Claude 3 Opus", reasoning: true, contextWindow: 200000, maxTokens: 8192 },
 ].map((m) => ({ ...m, input: ["text", "image"] as ("text" | "image")[], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }));
 
 export default function (pi: ExtensionAPI) {
