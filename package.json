@@ -1,0 +1,53 @@
+{
+  "name": "pi-antigravity-auth",
+  "version": "0.1.0",
+  "description": "Pi Coding Agent provider extension for Google Antigravity and Gemini CLI OAuth quotas with account rotation.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Joel Manuel <joeljmanuel@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/WindowsRefundDay/pi-antigravity-auth.git"
+  },
+  "bugs": {
+    "url": "https://github.com/WindowsRefundDay/pi-antigravity-auth/issues"
+  },
+  "homepage": "https://github.com/WindowsRefundDay/pi-antigravity-auth#readme",
+  "keywords": [
+    "pi-package",
+    "pi-coding-agent",
+    "antigravity",
+    "gemini",
+    "claude",
+    "oauth",
+    "google",
+    "provider"
+  ],
+  "pi": {
+    "extensions": ["./extensions"]
+  },
+  "files": [
+    "extensions/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test:list-models": "PI_SKIP_VERSION_CHECK=1 pi --no-extensions -e . --list-models antigravity",
+    "test:smoke": "PI_SKIP_VERSION_CHECK=1 pi --no-extensions -e . --provider antigravity --model gemini-3-flash-preview --no-builtin-tools -p 'Say ok in one word'"
+  },
+  "dependencies": {
+    "opencode-antigravity-auth": "1.2.9-beta.3"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "@types/node": "^24.10.1"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  }
+}
