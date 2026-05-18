@@ -49,16 +49,18 @@ List models:
 pi --list-models antigravity
 ```
 
-Common models:
+Common models matching the Antigravity model picker:
 
 ```bash
-pi --provider antigravity --model claude-sonnet-4-6
-pi --provider antigravity --model claude-opus-4-6-thinking-high
+pi --provider antigravity --model gemini-3.1-pro-high
+pi --provider antigravity --model gemini-3.1-pro-low
 pi --provider antigravity --model gemini-3-flash
-pi --provider antigravity --model gemini-3-pro
-pi --provider antigravity --model gemini-3-flash-preview
-pi --provider antigravity --model gemini-cli-3-flash-preview
+pi --provider antigravity --model claude-sonnet-4-6-thinking
+pi --provider antigravity --model claude-opus-4-6-thinking
+pi --provider antigravity --model gpt-oss-120b-medium
 ```
+
+Additional Gemini CLI preview models are also registered to use the separate Gemini CLI quota. Run `pi --list-models antigravity` for the full list.
 
 ## Accounts
 

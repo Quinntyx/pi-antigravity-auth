@@ -223,22 +223,19 @@ function toTools(context: Context) {
 }
 function resolveActualModel(id: string) {
   return id
+    .replace(/^gemini-3\.1-pro-(low|high)$/, "antigravity-gemini-3.1-pro")
     .replace(/^gemini-cli-/, "gemini-")
     .replace(/^antigravity-/, "")
     .replace(/^gemini-3-pro$/, "gemini-3-pro-low")
     .replace(/^gemini-3-pro-preview$/, "gemini-3-pro-preview")
     .replace(/claude-sonnet-4-5/g, "claude-sonnet-4-6")
-    .replace(/claude-opus-4-5/g, "claude-opus-4-6")
-    .replace(/claude-sonnet-4-6-thinking(?:-(low|medium|high))?$/g, "claude-sonnet-4-6")
-    .replace(/claude-opus-4-6-thinking-(low|medium|high)$/g, "claude-opus-4-6-thinking")
-    .replace(/^claude-3-5-sonnet$/, "claude-sonnet-4-6")
-    .replace(/^claude-3-opus$/, "claude-opus-4-6-thinking");
+    .replace(/claude-opus-4-5/g, "claude-opus-4-6");
 }
 function thinkingConfig(id: string, reasoning?: string) {
   const lower = id.toLowerCase();
   const level = reasoning === "high" || reasoning === "xhigh" ? "high" : reasoning === "medium" ? "medium" : "low";
   if (lower.includes("gemini-3")) return { includeThoughts: true, thinkingLevel: level.toUpperCase() };
-  if (lower.includes("claude") && (lower.includes("thinking") || lower.includes("claude-3"))) return { include_thoughts: true, thinking_budget: level === "high" ? 32768 : level === "medium" ? 16384 : 8192 };
+  if (lower.includes("claude") && lower.includes("thinking")) return { include_thoughts: true, thinking_budget: level === "high" ? 32768 : level === "medium" ? 16384 : 8192 };
   return undefined;
 }
 function buildRequestBody(model: Model<any>, context: Context, options?: SimpleStreamOptions) {
@@ -424,21 +421,19 @@ async function exchange(code: string, verifier: string) {
 }
 
 const models = [
-  { id: "gemini-3-pro", name: "Gemini 3 Pro (OAuth auto quota)", reasoning: true, contextWindow: 1000000, maxTokens: 65536 },
-  { id: "gemini-3-pro-low", name: "Antigravity Gemini 3 Pro Low", reasoning: true, contextWindow: 1000000, maxTokens: 65536 },
-  { id: "gemini-3-pro-high", name: "Antigravity Gemini 3 Pro High", reasoning: true, contextWindow: 1000000, maxTokens: 65536 },
-  { id: "gemini-3-flash", name: "Gemini 3 Flash (OAuth auto quota)", reasoning: true, contextWindow: 1000000, maxTokens: 65536 },
-  { id: "gemini-3-pro-preview", name: "Gemini CLI Gemini 3 Pro Preview", reasoning: true, contextWindow: 1000000, maxTokens: 65536 },
-  { id: "gemini-3-flash-preview", name: "Gemini CLI Gemini 3 Flash Preview", reasoning: true, contextWindow: 1000000, maxTokens: 65536 },
-  { id: "gemini-cli-3-pro-preview", name: "Gemini CLI Gemini 3 Pro Preview (explicit)", reasoning: true, contextWindow: 1000000, maxTokens: 65536 },
-  { id: "gemini-cli-3-flash-preview", name: "Gemini CLI Gemini 3 Flash Preview (explicit)", reasoning: true, contextWindow: 1000000, maxTokens: 65536 },
-  { id: "claude-sonnet-4-6", name: "Antigravity Claude Sonnet 4.6", reasoning: false, contextWindow: 200000, maxTokens: 32768 },
-  { id: "claude-opus-4-6-thinking", name: "Antigravity Claude Opus 4.6 Thinking", reasoning: true, contextWindow: 200000, maxTokens: 65536 },
-  { id: "claude-opus-4-6-thinking-low", name: "Antigravity Claude Opus 4.6 Thinking Low", reasoning: true, contextWindow: 200000, maxTokens: 65536 },
-  { id: "claude-opus-4-6-thinking-medium", name: "Antigravity Claude Opus 4.6 Thinking Medium", reasoning: true, contextWindow: 200000, maxTokens: 65536 },
-  { id: "claude-opus-4-6-thinking-high", name: "Antigravity Claude Opus 4.6 Thinking High", reasoning: true, contextWindow: 200000, maxTokens: 65536 },
-  { id: "claude-3-5-sonnet", name: "Antigravity Claude 3.5 Sonnet", reasoning: true, contextWindow: 200000, maxTokens: 8192 },
-  { id: "claude-3-opus", name: "Antigravity Claude 3 Opus", reasoning: true, contextWindow: 200000, maxTokens: 8192 },
+  // Antigravity model picker models
+  { id: "gemini-3.1-pro-high", name: "Gemini 3.1 Pro (High)", reasoning: true, contextWindow: 1048576, maxTokens: 65535 },
+  { id: "gemini-3.1-pro-low", name: "Gemini 3.1 Pro (Low)", reasoning: true, contextWindow: 1048576, maxTokens: 65535 },
+  { id: "gemini-3-flash", name: "Gemini 3 Flash", reasoning: true, contextWindow: 1048576, maxTokens: 65536 },
+  { id: "claude-sonnet-4-6-thinking", name: "Claude Sonnet 4.6 (Thinking)", reasoning: true, contextWindow: 200000, maxTokens: 64000 },
+  { id: "claude-opus-4-6-thinking", name: "Claude Opus 4.6 (Thinking)", reasoning: true, contextWindow: 200000, maxTokens: 64000 },
+  { id: "gpt-oss-120b-medium", name: "GPT-OSS 120B (Medium)", reasoning: true, contextWindow: 200000, maxTokens: 64000 },
+
+  // Extra Gemini CLI quota models (Gemini-only, separate quota from Antigravity)
+  { id: "gemini-3-pro-preview", name: "Gemini CLI Gemini 3 Pro Preview", reasoning: true, contextWindow: 1048576, maxTokens: 65535 },
+  { id: "gemini-3-flash-preview", name: "Gemini CLI Gemini 3 Flash Preview", reasoning: true, contextWindow: 1048576, maxTokens: 65536 },
+  { id: "gemini-cli-3-pro-preview", name: "Gemini CLI Gemini 3 Pro Preview (explicit)", reasoning: true, contextWindow: 1048576, maxTokens: 65535 },
+  { id: "gemini-cli-3-flash-preview", name: "Gemini CLI Gemini 3 Flash Preview (explicit)", reasoning: true, contextWindow: 1048576, maxTokens: 65536 },
 ].map((m) => ({ ...m, input: ["text", "image"] as ("text" | "image")[], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }));
 
 export default function (pi: ExtensionAPI) {
