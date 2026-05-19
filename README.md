@@ -137,42 +137,13 @@ All configuration settings are saved in:
 
 The extension supports fine-tuned control over account cycling and quota fallback behavior. Below is a detailed breakdown of all available settings:
 
-| Option | Type / Values | Default | Description |
+| Option | Type / Values | Default | Description & Details |
 | :--- | :--- | :--- | :--- |
-| `accountSelectionStrategy` | `round-robin`, `random`, `sticky` | `round-robin` | Controls how the active account is selected from the authenticated pool. |
-| `rotateAccounts` | `true`, `false` | `true` | Automatically cycles/advances to the next account after a successful model request. |
-| `geminiQuota` | `auto`, `antigravity`, `gemini-cli` | `auto` | Specifies the preferred Google quota family to route requests through. |
-| `quotaFallback` | `true`, `false` | `true` | Automatically falls back to the other quota family if the preferred family rate-limits or fails. |
-| `quiet` | `true`, `false` | `false` | Silences non-critical warnings and startup notices in the command line interface. |
-
-#### Detailed Settings Breakdown
-
-#### `accountSelectionStrategy`
-Determines the algorithm used to select a Google account for the next request:
-- **`round-robin`** *(Recommended)*: Cycles sequentially through all active accounts. This evenly distributes load and helps maximize overall token/request limits.
-- **`random`**: Dynamically chooses an account at random for each request.
-- **`sticky`**: Continues using the last successfully used account for consecutive requests. Helpful if you want to minimize frequent account hops.
-
-#### `rotateAccounts`
-Controls whether the active account pointer advances after a successful operation:
-- **`true`**: Once a request succeeds, the active pointer shifts, ensuring the next request uses the next account according to your selection strategy.
-- **`false`**: The current account remains active indefinitely until it encounters a failure or rate limit, at which point the rotation logic takes over.
-
-#### `geminiQuota`
-Determines which underlying Google platform API/quota family is preferred:
-- **`auto`**: Routes dynamically. Standard models default to the main `antigravity` enterprise quota, while models with `-preview` or `gemini-cli-` prefixes default to the `gemini-cli` quota.
-- **`antigravity`**: Prioritizes the newer enterprise Google Antigravity quota pool.
-- **`gemini-cli`**: Prioritizes the legacy separate Gemini CLI quota pool.
-
-#### `quotaFallback`
-Enables intelligent high-availability failover across quota families:
-- **`true`**: If a request to your preferred quota fails (e.g. rate limits, 429 status codes, server errors), the extension instantly retries the request using the secondary quota family before returning an error to Pi.
-- **`false`**: Disables cross-quota fallback; failures on the preferred family are returned immediately.
-
-#### `quiet`
-Controls CLI output and developer verbosity:
-- **`true`**: Silences additional status print statements and startup notices.
-- **`false`**: Displays real-time diagnostic prints and critical notices (such as the Gemini CLI deprecation warning).
+| `accountSelectionStrategy` | `round-robin`, `random`, `sticky` | `round-robin` | Controls how the active account is selected from the authenticated pool.<br/><br/>**Behavior:**<br/>• `round-robin` *(Recommended)*: Cycles sequentially through all active accounts to evenly distribute load and help maximize overall token/request limits.<br/>• `random`: Dynamically chooses an account at random for each request.<br/>• `sticky`: Continues using the last successfully used account for consecutive requests, minimizing frequent account hops. |
+| `rotateAccounts` | `true`, `false` | `true` | Controls whether the active account pointer advances after a successful operation.<br/><br/>**Behavior:**<br/>• `true`: Once a request succeeds, the active pointer shifts, ensuring the next request uses the next account according to the selection strategy.<br/>• `false`: The current account remains active indefinitely until it encounters a failure or rate limit, at which point rotation logic takes over. |
+| `geminiQuota` | `auto`, `antigravity`, `gemini-cli` | `auto` | Specifies the preferred Google quota family to route requests through.<br/><br/>**Behavior:**<br/>• `auto`: Routes dynamically. Standard models default to the main `antigravity` enterprise quota pool, while models with `-preview` or `gemini-cli-` prefixes default to the legacy `gemini-cli` quota pool.<br/>• `antigravity`: Prioritizes the newer enterprise Google Antigravity quota pool.<br/>• `gemini-cli`: Prioritizes the legacy separate Gemini CLI quota pool. |
+| `quotaFallback` | `true`, `false` | `true` | Enables intelligent high-availability failover across quota families.<br/><br/>**Behavior:**<br/>• `true`: If a request to the preferred quota family fails (e.g., rate limits, 429 status codes, server errors), the extension instantly retries using the secondary quota family before returning an error.<br/>• `false`: Disables cross-quota fallback; failures on the preferred family are returned immediately. |
+| `quiet` | `true`, `false` | `false` | Controls CLI output and developer verbosity.<br/><br/>**Behavior:**<br/>• `true`: Silences additional status print statements and startup notices.<br/>• `false`: Displays real-time diagnostic prints and critical notices (such as the Gemini CLI deprecation warning). |
 
 
 ### Account Operations

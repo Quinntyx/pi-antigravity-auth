@@ -68,6 +68,7 @@ const DEFAULT_CONFIG: AntigravityConfig = {
 };
 
 const accessCache = new Map<string, Access>();
+const refreshPromises = new Map<string, Promise<string>>();
 let roundRobin = 0;
 let toolCallCounter = 0;
 
@@ -164,18 +165,22 @@ function markAccountSuccess(storage: AccountStorage, family: string, index: numb
   storage.activeIndexByFamily = { ...(storage.activeIndexByFamily || {}), [family]: next };
   roundRobin = next;
 }
-let refreshingTokens = new Set<string>();
-
 async function refreshAccess(account: Account): Promise<string> {
   const cached = accessCache.get(account.refreshToken);
   if (cached && cached.expires > Date.now() + 60_000) {
-    if (cached.expires < Date.now() + 600_000 && !refreshingTokens.has(account.refreshToken)) {
-      refreshingTokens.add(account.refreshToken);
-      doRefresh(account).finally(() => refreshingTokens.delete(account.refreshToken));
+    if (cached.expires < Date.now() + 600_000 && !refreshPromises.has(account.refreshToken)) {
+      const p = doRefresh(account).finally(() => refreshPromises.delete(account.refreshToken));
+      refreshPromises.set(account.refreshToken, p);
+      p.catch(() => {}); // prevent unhandled promise rejection in the background
     }
     return cached.token;
   }
-  return doRefresh(account);
+  let p = refreshPromises.get(account.refreshToken);
+  if (!p) {
+    p = doRefresh(account).finally(() => refreshPromises.delete(account.refreshToken));
+    refreshPromises.set(account.refreshToken, p);
+  }
+  return p;
 }
 
 async function doRefresh(account: Account): Promise<string> {
@@ -345,24 +350,36 @@ function handleChunk(stream: any, output: AssistantMessage, state: any, chunk: a
   }
 }
 function modelForCost(output: AssistantMessage): any { return { cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }; }
-async function streamSse(response: Response, stream: any, output: AssistantMessage, state: any) {
+async function streamSse(response: Response, stream: any, output: AssistantMessage, state: any, signal?: AbortSignal) {
   if (!response.body) throw new Error("Empty response body");
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buf = "";
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
-    let idx;
-    while ((idx = buf.indexOf("\n")) >= 0) {
-      const line = buf.slice(0, idx).trim();
-      buf = buf.slice(idx + 1);
-      if (!line.startsWith("data:")) continue;
-      const data = line.slice(5).trim();
-      if (!data || data === "[DONE]") continue;
-      handleChunk(stream, output, state, JSON.parse(data));
+  try {
+    while (true) {
+      if (signal?.aborted) {
+        throw new Error("Aborted");
+      }
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (signal?.aborted) {
+        await reader.cancel();
+        throw new Error("Aborted");
+      }
+      buf += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, idx).trim();
+        buf = buf.slice(idx + 1);
+        if (!line.startsWith("data:")) continue;
+        const data = line.slice(5).trim();
+        if (!data || data === "[DONE]") continue;
+        handleChunk(stream, output, state, JSON.parse(data));
+      }
     }
+  } catch (err) {
+    await reader.cancel().catch(() => {});
+    throw err;
   }
 }
 function streamAntigravity(model: Model<any>, context: Context, options?: SimpleStreamOptions) {
@@ -416,7 +433,7 @@ function streamAntigravity(model: Model<any>, context: Context, options?: Simple
                 if ([403, 404, 429, 500, 502, 503, 504].includes(transformed.status)) continue;
                 throw lastError;
               }
-              await streamSse(transformed, stream, output, state);
+              await streamSse(transformed, stream, output, state, options?.signal);
               await mutateAccounts((s) => {
                 const idx = s.accounts.findIndex(x => x.email === account.email);
                 if (idx >= 0) markAccountSuccess(s, `${family}:${style}`, idx, config);
@@ -433,8 +450,10 @@ function streamAntigravity(model: Model<any>, context: Context, options?: Simple
       throw lastError || new Error("All Antigravity/Gemini CLI accounts and quotas failed");
     } catch (e) {
       endCurrent(stream, output, state);
+      const errMsg = e instanceof Error ? e.message : String(e);
+      const isOverflow = /(context|token|payload|length|entity|window|limit|413)\s*(exceeded|too large|limit|bound|overflow)/i.test(errMsg);
       output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-      output.errorMessage = e instanceof Error ? e.message : String(e);
+      output.errorMessage = isOverflow ? `context_length_exceeded: ${errMsg}` : errMsg;
       stream.push({ type: "error", reason: output.stopReason as any, error: output });
       stream.end();
     }
@@ -497,16 +516,31 @@ const models = [
 ].map((m) => ({ ...m, input: ["text", "image"] as ("text" | "image")[], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }));
 
 export default function (pi: ExtensionAPI) {
-  // Warn about Gemini CLI separate quota deprecation on startup
-  console.log("\x1b[33m[Antigravity] Note: Gemini CLI separate quota might be deprecated in the future. Check README for more info.\x1b[0m\n");
-
-  // Emphasize login procedure on startup if no accounts exist
-  readAccounts().then(storage => {
-    if (!storage.accounts || storage.accounts.length === 0) {
-      console.log("\x1b[1m\x1b[35m[Antigravity Auth]\x1b[0m Please authenticate: run \x1b[32m/login antigravity\x1b[0m or \x1b[32m/antigravity-import-opencode\x1b[0m in Pi.\n");
+  // Use session_start event to warn about Gemini CLI separate quota deprecation on startup
+  pi.on("session_start", async (event, ctx) => {
+    // Only print warnings and notifications in active UI sessions
+    if (ctx.hasUI) {
+      ctx.ui.notify("Note: Gemini CLI separate quota might be deprecated in the future. Check README for more info.", "info");
+      try {
+        const storage = await readAccounts();
+        if (!storage.accounts || storage.accounts.length === 0) {
+          ctx.ui.notify("Antigravity Auth: Please authenticate by running /login antigravity or /antigravity-import-opencode.", "warning");
+        }
+      } catch {
+        ctx.ui.notify("Antigravity Auth: Please authenticate by running /login antigravity or /antigravity-import-opencode.", "warning");
+      }
+    } else {
+      // Print to console if running in CLI non-interactive mode
+      console.log("\x1b[33m[Antigravity] Note: Gemini CLI separate quota might be deprecated in the future. Check README for more info.\x1b[0m\n");
+      try {
+        const storage = await readAccounts();
+        if (!storage.accounts || storage.accounts.length === 0) {
+          console.log("\x1b[1m\x1b[35m[Antigravity Auth]\x1b[0m Please authenticate: run \x1b[32m/login antigravity\x1b[0m or \x1b[32m/antigravity-import-opencode\x1b[0m in Pi.\n");
+        }
+      } catch {
+        console.log("\x1b[1m\x1b[35m[Antigravity Auth]\x1b[0m Please authenticate: run \x1b[32m/login antigravity\x1b[0m or \x1b[32m/antigravity-import-opencode\x1b[0m in Pi.\n");
+      }
     }
-  }).catch(() => {
-    console.log("\x1b[1m\x1b[35m[Antigravity Auth]\x1b[0m Please authenticate: run \x1b[32m/login antigravity\x1b[0m or \x1b[32m/antigravity-import-opencode\x1b[0m in Pi.\n");
   });
 
   pi.registerProvider("antigravity", {
