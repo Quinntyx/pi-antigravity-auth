@@ -543,6 +543,27 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
+  // Intercept and normalize context length and payload entity errors in stream
+  pi.on("message_end", async (event, ctx) => {
+    const message = event.message;
+    if (message.role !== "assistant") return;
+    if (message.stopReason !== "error") return;
+    if (message.provider !== "antigravity" && ctx.model?.provider !== "antigravity") return;
+
+    const errorMessage = message.errorMessage ?? "";
+    if (errorMessage.includes("context_length_exceeded")) return;
+
+    const isOverflow = /(context|token|payload|length|entity|window|limit|413)\s*(exceeded|too large|limit|bound|overflow)/i.test(errorMessage);
+    if (!isOverflow) return;
+
+    return {
+      message: {
+        ...message,
+        errorMessage: `context_length_exceeded: ${errorMessage}`,
+      },
+    };
+  });
+
   pi.registerProvider("antigravity", {
     name: "Google Antigravity",
     baseUrl: "https://cloudcode-pa.googleapis.com",
@@ -593,6 +614,49 @@ export default function (pi: ExtensionAPI) {
   });
   pi.registerCommand("antigravity-config", {
     description: "Show or set Antigravity config. Usage: /antigravity-config key=value ...",
+    getArgumentCompletions: (argumentPrefix: string) => {
+      const keys = ["accountSelectionStrategy", "rotateAccounts", "geminiQuota", "quotaFallback", "quiet"];
+      const keyValues: Record<string, string[]> = {
+        accountSelectionStrategy: ["round-robin", "random", "sticky"],
+        rotateAccounts: ["true", "false"],
+        geminiQuota: ["auto", "antigravity", "gemini-cli"],
+        quotaFallback: ["true", "false"],
+        quiet: ["true", "false"],
+      };
+
+      const parts = argumentPrefix.split(/\s+/);
+      const activePart = parts[parts.length - 1] ?? "";
+      const previousParts = parts.slice(0, parts.length - 1);
+      const prefixStr = previousParts.length > 0 ? previousParts.join(" ") + " " : "";
+
+      if (activePart.includes("=")) {
+        const [key, val] = activePart.split("=");
+        if (keys.includes(key)) {
+          const possibleValues = keyValues[key] || [];
+          const filtered = possibleValues.filter(v => v.startsWith(val));
+          if (filtered.length > 0) {
+            return filtered.map(v => ({
+              value: `${prefixStr}${key}=${v} `,
+              label: `${key}=${v}`,
+              description: `Set ${key} to ${v}`,
+            }));
+          }
+        }
+        return null;
+      } else {
+        const completedKeys = previousParts.map(p => p.split("=")[0]);
+        const availableKeys = keys.filter(k => !completedKeys.includes(k));
+        const filteredKeys = availableKeys.filter(k => k.startsWith(activePart));
+        if (filteredKeys.length > 0) {
+          return filteredKeys.map(k => ({
+            value: `${prefixStr}${k}=`,
+            label: `${k}=`,
+            description: `Configure ${k}`,
+          }));
+        }
+        return null;
+      }
+    },
     handler: async (args, ctx) => {
       const config = await readConfig();
       const trimmed = args.trim();
