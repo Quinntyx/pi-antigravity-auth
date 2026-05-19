@@ -24,7 +24,9 @@
     "provider"
   ],
   "pi": {
-    "extensions": ["./extensions"]
+    "extensions": [
+      "./extensions"
+    ]
   },
   "files": [
     "extensions/",
@@ -34,18 +36,20 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test:list-models": "PI_SKIP_VERSION_CHECK=1 pi --no-extensions -e . --list-models antigravity",
-    "test:smoke": "PI_SKIP_VERSION_CHECK=1 pi --no-extensions -e . --provider antigravity --model gemini-3-flash-preview --no-builtin-tools -p 'Say ok in one word'"
+    "test:smoke": "PI_SKIP_VERSION_CHECK=1 pi --no-extensions -e . --provider antigravity --model gemini-3.5-flash-preview --no-builtin-tools -p 'Say ok in one word'"
   },
   "dependencies": {
-    "opencode-antigravity-auth": "1.2.9-beta.3"
+    "opencode-antigravity-auth": "^1.6.0",
+    "proper-lockfile": "^4.1.2"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*"
   },
   "devDependencies": {
-    "typescript": "^5.9.3",
-    "@types/node": "^24.10.1"
+    "@types/node": "^24.10.1",
+    "@types/proper-lockfile": "^4.1.4",
+    "typescript": "^5.9.3"
   },
   "engines": {
     "node": ">=22.19.0"

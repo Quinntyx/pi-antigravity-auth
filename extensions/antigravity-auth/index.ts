@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { lock } from "proper-lockfile";
 import {
   calculateCost,
   createAssistantMessageEventStream,
@@ -17,6 +18,8 @@ import {
   ANTIGRAVITY_CLIENT_SECRET,
   ANTIGRAVITY_REDIRECT_URI,
   ANTIGRAVITY_SCOPES,
+  getRandomizedHeaders,
+  SKIP_THOUGHT_SIGNATURE,
 } from "opencode-antigravity-auth/dist/src/constants.js";
 
 const CLIENT_ID = process.env.PI_ANTIGRAVITY_CLIENT_ID || ANTIGRAVITY_CLIENT_ID;
@@ -33,17 +36,7 @@ const ENDPOINTS = [
   "https://cloudcode-pa.googleapis.com",
 ];
 
-const ANTIGRAVITY_VERSION = "1.23.2";
-const HEADERS = {
-  "User-Agent": `antigravity/${ANTIGRAVITY_VERSION} darwin/arm64`,
-  "X-Goog-Api-Client": "google-cloud-sdk vscode_cloudshelleditor/0.1",
-  "Client-Metadata": '{"ideType":"IDE_UNSPECIFIED","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}',
-};
-const GEMINI_CLI_HEADERS = {
-  "User-Agent": "google-api-nodejs-client/9.15.1",
-  "X-Goog-Api-Client": "gl-node/22.17.0",
-  "Client-Metadata": "ideType=IDE_UNSPECIFIED,platform=PLATFORM_UNSPECIFIED,pluginType=GEMINI",
-};
+// Hardcoded headers removed. Using getRandomizedHeaders dynamically from constants.js
 
 type Account = {
   email?: string;
@@ -52,6 +45,9 @@ type Account = {
   managedProjectId?: string;
   addedAt?: number;
   lastUsed?: number;
+  cooldownUntil?: number;
+  failureCount?: number;
+  assignedUserAgent?: string;
 };
 type AccountStorage = { version: number; accounts: Account[]; activeIndex?: number; activeIndexByFamily?: Record<string, number> };
 type Access = { token: string; expires: number };
@@ -82,8 +78,8 @@ async function sha256(input: string) {
   return b64url(createHash("sha256").update(input).digest());
 }
 async function readAccounts(): Promise<AccountStorage> {
-  const text = await fs.readFile(ACCOUNTS_PATH, "utf8");
-  const data = JSON.parse(text);
+  const text = await fs.readFile(ACCOUNTS_PATH, "utf8").catch(() => "{}");
+  const data = JSON.parse(text || "{}");
   const accounts = Array.isArray(data.accounts) ? data.accounts.filter((a: any) => a?.refreshToken) : [];
   return { version: data.version ?? 1, accounts, activeIndex: data.activeIndex ?? 0 };
 }
@@ -95,6 +91,21 @@ async function writeAccounts(storage: AccountStorage) {
     const old = await fs.readFile(gi, "utf8").catch(() => "");
     if (!old.split(/\r?\n/).includes("antigravity-accounts.json")) await fs.appendFile(gi, `${old.endsWith("\n") || !old ? "" : "\n"}antigravity-accounts.json\n`);
   } catch {}
+}
+async function mutateAccounts(modifier: (storage: AccountStorage) => void | Promise<void>) {
+  await fs.mkdir(dirname(ACCOUNTS_PATH), { recursive: true });
+  await fs.appendFile(ACCOUNTS_PATH, "").catch(() => {});
+  let release;
+  try {
+    release = await lock(ACCOUNTS_PATH, { retries: { retries: 5, factor: 2, minTimeout: 100, maxTimeout: 1000 } });
+    const storage = await readAccounts();
+    await modifier(storage);
+    await writeAccounts(storage);
+  } catch (err) {
+    console.error("[Antigravity] Failed to acquire lock for accounts", err);
+  } finally {
+    if (release) await release();
+  }
 }
 async function readConfig(): Promise<AntigravityConfig> {
   try {
@@ -121,30 +132,53 @@ function quotaStylesFor(modelId: string, config: AntigravityConfig): QuotaStyle[
 function endpointsFor(style: QuotaStyle) {
   return style === "gemini-cli" ? ["https://cloudcode-pa.googleapis.com"] : ENDPOINTS;
 }
-function headersFor(style: QuotaStyle) {
-  return style === "gemini-cli" ? GEMINI_CLI_HEADERS : HEADERS;
+function headersFor(style: QuotaStyle, modelId?: string) {
+  return getRandomizedHeaders(style as any, modelId);
 }
 function accountOrder(storage: AccountStorage, family: string, config: AntigravityConfig): number[] {
   const count = storage.accounts.length;
   if (count <= 0) return [];
+  const now = Date.now();
+  
+  const healthyIndices = storage.accounts
+    .map((a, i) => ({ a, i }))
+    .filter(({ a }) => !a.cooldownUntil || a.cooldownUntil < now)
+    .map(({ i }) => i);
+
+  if (healthyIndices.length === 0) return [];
+
   if (config.accountSelectionStrategy === "random") {
-    const start = Math.floor(Math.random() * count);
-    return Array.from({ length: count }, (_, i) => (start + i) % count);
+    const start = Math.floor(Math.random() * healthyIndices.length);
+    return Array.from({ length: healthyIndices.length }, (_, i) => healthyIndices[(start + i) % healthyIndices.length]);
   }
   const familyIndex = storage.activeIndexByFamily?.[family];
   const start = config.accountSelectionStrategy === "sticky" ? (familyIndex ?? storage.activeIndex ?? 0) : (roundRobin || familyIndex || storage.activeIndex || 0);
-  return Array.from({ length: count }, (_, i) => (start + i) % count);
+  return Array.from({ length: healthyIndices.length }, (_, i) => healthyIndices[(start + i) % healthyIndices.length]);
 }
 function markAccountSuccess(storage: AccountStorage, family: string, index: number, config: AntigravityConfig) {
   storage.accounts[index].lastUsed = Date.now();
+  storage.accounts[index].failureCount = 0;
+  storage.accounts[index].cooldownUntil = 0;
   const next = config.rotateAccounts ? (index + 1) % storage.accounts.length : index;
   storage.activeIndex = next;
   storage.activeIndexByFamily = { ...(storage.activeIndexByFamily || {}), [family]: next };
   roundRobin = next;
 }
+let refreshingTokens = new Set<string>();
+
 async function refreshAccess(account: Account): Promise<string> {
   const cached = accessCache.get(account.refreshToken);
-  if (cached && cached.expires > Date.now() + 60_000) return cached.token;
+  if (cached && cached.expires > Date.now() + 60_000) {
+    if (cached.expires < Date.now() + 600_000 && !refreshingTokens.has(account.refreshToken)) {
+      refreshingTokens.add(account.refreshToken);
+      doRefresh(account).finally(() => refreshingTokens.delete(account.refreshToken));
+    }
+    return cached.token;
+  }
+  return doRefresh(account);
+}
+
+async function doRefresh(account: Account): Promise<string> {
   const start = Date.now();
   const res = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
@@ -192,7 +226,7 @@ function toContents(model: Model<any>, context: Context) {
           // uses the same compatibility shim in its debug logs.
           parts.push({
             functionCall: { name: b.name, args: b.arguments ?? {}, ...(needsId ? { id: b.id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64) } : {}) },
-            ...(geminiReplay ? { thoughtSignature: "skip_thought_signature_validator" } : {}),
+            ...(geminiReplay ? { thoughtSignature: SKIP_THOUGHT_SIGNATURE } : {}),
           });
         }
       }
@@ -223,18 +257,20 @@ function toTools(context: Context) {
 }
 function resolveActualModel(id: string) {
   return id
+    .replace(/^gemini-3\.5-pro-(low|high)$/, "antigravity-gemini-3.5-pro")
+    .replace(/^gemini-3\.5-flash-(low|high)$/, "antigravity-gemini-3.5-flash")
     .replace(/^gemini-3\.1-pro-(low|high)$/, "antigravity-gemini-3.1-pro")
     .replace(/^gemini-cli-/, "gemini-")
     .replace(/^antigravity-/, "")
     .replace(/^gemini-3-pro$/, "gemini-3-pro-low")
     .replace(/^gemini-3-pro-preview$/, "gemini-3-pro-preview")
-    .replace(/claude-sonnet-4-5/g, "claude-sonnet-4-6")
-    .replace(/claude-opus-4-5/g, "claude-opus-4-6");
+    .replace(/^gemini-3\.5-pro$/, "antigravity-gemini-3.5-pro")
+    .replace(/^gemini-3\.5-flash$/, "antigravity-gemini-3.5-flash");
 }
 function thinkingConfig(id: string, reasoning?: string) {
   const lower = id.toLowerCase();
   const level = reasoning === "high" || reasoning === "xhigh" ? "high" : reasoning === "medium" ? "medium" : "low";
-  if (lower.includes("gemini-3")) return { includeThoughts: true, thinkingLevel: level.toUpperCase() };
+  if (lower.includes("gemini-3") || lower.includes("gemini-2.5")) return { includeThoughts: true, thinkingLevel: level.toUpperCase() };
   if (lower.includes("claude") && lower.includes("thinking")) return { include_thoughts: true, thinking_budget: level === "high" ? 32768 : level === "medium" ? 16384 : 8192 };
   return undefined;
 }
@@ -352,14 +388,28 @@ function streamAntigravity(model: Model<any>, context: Context, options?: Simple
         for (const accountIndex of accountOrder(storage, `${family}:${style}`, config)) {
           const account = storage.accounts[accountIndex];
           try {
+            await new Promise(r => setTimeout(r, 50 + Math.random() * 200)); // Jitter
             const access = await refreshAccess(account);
             const project = effectiveProject(account);
             for (const endpoint of endpointsFor(style)) {
               const prepared: any = prepareAntigravityRequest(fakeInput, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal: options?.signal }, access, project, endpoint, style, false, { claudeToolHardening: true });
               const h = new Headers(prepared.init.headers || {});
-              for (const [k, v] of Object.entries(headersFor(style))) h.set(k, v);
+              for (const [k, v] of Object.entries(headersFor(style, model.id))) h.set(k, v);
+              if (account.assignedUserAgent) h.set("User-Agent", account.assignedUserAgent);
               const res = await fetch(prepared.request, { ...prepared.init, headers: h });
-              if (res.status === 429) { lastError = new Error(`${style} quota rate limited: ${account.email || "account"}`); break; }
+              if (res.status === 429) { 
+                await mutateAccounts((s) => {
+                  const a = s.accounts.find(x => x.email === account.email);
+                  if (a) {
+                    a.failureCount = (a.failureCount || 0) + 1;
+                    const backoffMs = Math.min(30000 * Math.pow(2, a.failureCount - 1), 3600000);
+                    a.cooldownUntil = Date.now() + backoffMs;
+                  }
+                });
+                const backoffMs = Math.min(30000 * Math.pow(2, (account.failureCount || 0)), 3600000);
+                lastError = new Error(`${style} quota rate limited: ${account.email || "account"} (Cooldown: ${backoffMs/1000}s)`); 
+                break; 
+              }
               const transformed = await transformAntigravityResponse(res, true, undefined, requested, project, endpoint, prepared.effectiveModel, prepared.sessionId);
               if (!transformed.ok) {
                 lastError = new Error(`${style} ${transformed.status}: ${await transformed.text().catch(() => "")}`);
@@ -367,8 +417,10 @@ function streamAntigravity(model: Model<any>, context: Context, options?: Simple
                 throw lastError;
               }
               await streamSse(transformed, stream, output, state);
-              markAccountSuccess(storage, `${family}:${style}`, accountIndex, config);
-              writeAccounts(storage).catch(() => {});
+              await mutateAccounts((s) => {
+                const idx = s.accounts.findIndex(x => x.email === account.email);
+                if (idx >= 0) markAccountSuccess(s, `${family}:${style}`, idx, config);
+              });
             endCurrent(stream, output, state);
             if (output.content.some((b: any) => b.type === "toolCall")) output.stopReason = "toolUse";
             stream.push({ type: "done", reason: output.stopReason as any, message: output });
@@ -413,30 +465,50 @@ async function exchange(code: string, verifier: string) {
   const tok: any = await res.json();
   const info: any = await fetch("https://www.googleapis.com/oauth2/v1/userinfo?alt=json", { headers: { Authorization: `Bearer ${tok.access_token}` } }).then(r => r.ok ? r.json() : {}).catch(() => ({}));
   const storage = await readAccounts().catch(() => ({ version: 1, accounts: [], activeIndex: 0 }));
-  if (tok.refresh_token && !storage.accounts.some(a => a.refreshToken === tok.refresh_token || (info.email && a.email === info.email))) {
-    storage.accounts.push({ email: info.email, refreshToken: tok.refresh_token, addedAt: Date.now(), lastUsed: Date.now() });
-    await writeAccounts(storage);
+  if (tok.refresh_token) {
+    await mutateAccounts((s) => {
+      if (!s.accounts.some(a => a.refreshToken === tok.refresh_token || (info.email && a.email === info.email))) {
+        const macVersions = ["14_0", "14_1_2", "14_2", "14_3_1", "14_4", "14_4_1", "14_5", "15_0", "15_1"];
+        const osVer = macVersions[Math.floor(Math.random() * macVersions.length)];
+        const plugins = ["1.23.2", "1.23.1", "1.22.0", "1.24.0", "1.25.0"];
+        const pluginVer = plugins[Math.floor(Math.random() * plugins.length)];
+        const assignedUserAgent = `antigravity/${pluginVer} darwin/arm64 Mac OS X ${osVer}`;
+        s.accounts.push({ email: info.email, refreshToken: tok.refresh_token, addedAt: Date.now(), lastUsed: Date.now(), assignedUserAgent });
+      }
+    });
   }
   return { refresh: tok.refresh_token || "", access: tok.access_token, expires: start + (tok.expires_in ?? 3600) * 1000 };
 }
 
 const models = [
-  // Antigravity model picker models
-  { id: "gemini-3.1-pro-high", name: "Gemini 3.1 Pro (High)", reasoning: true, contextWindow: 1048576, maxTokens: 65535 },
-  { id: "gemini-3.1-pro-low", name: "Gemini 3.1 Pro (Low)", reasoning: true, contextWindow: 1048576, maxTokens: 65535 },
-  { id: "gemini-3-flash", name: "Gemini 3 Flash", reasoning: true, contextWindow: 1048576, maxTokens: 65536 },
+  // Antigravity model picker models (upgraded to Gemini 3.5 and Claude 4.6)
+  { id: "gemini-3.5-pro-high", name: "Gemini 3.5 Pro (High)", reasoning: true, contextWindow: 1048576, maxTokens: 65535 },
+  { id: "gemini-3.5-pro-low", name: "Gemini 3.5 Pro (Low)", reasoning: true, contextWindow: 1048576, maxTokens: 65535 },
+  { id: "gemini-3.5-flash", name: "Gemini 3.5 Flash", reasoning: true, contextWindow: 1048576, maxTokens: 65536 },
   { id: "claude-sonnet-4-6-thinking", name: "Claude Sonnet 4.6 (Thinking)", reasoning: true, contextWindow: 200000, maxTokens: 64000 },
   { id: "claude-opus-4-6-thinking", name: "Claude Opus 4.6 (Thinking)", reasoning: true, contextWindow: 200000, maxTokens: 64000 },
   { id: "gpt-oss-120b-medium", name: "GPT-OSS 120B (Medium)", reasoning: true, contextWindow: 200000, maxTokens: 64000 },
 
   // Extra Gemini CLI quota models (Gemini-only, separate quota from Antigravity)
-  { id: "gemini-3-pro-preview", name: "Gemini CLI Gemini 3 Pro Preview", reasoning: true, contextWindow: 1048576, maxTokens: 65535 },
-  { id: "gemini-3-flash-preview", name: "Gemini CLI Gemini 3 Flash Preview", reasoning: true, contextWindow: 1048576, maxTokens: 65536 },
-  { id: "gemini-cli-3-pro-preview", name: "Gemini CLI Gemini 3 Pro Preview (explicit)", reasoning: true, contextWindow: 1048576, maxTokens: 65535 },
-  { id: "gemini-cli-3-flash-preview", name: "Gemini CLI Gemini 3 Flash Preview (explicit)", reasoning: true, contextWindow: 1048576, maxTokens: 65536 },
+  { id: "gemini-3.5-pro-preview", name: "Gemini CLI Gemini 3.5 Pro Preview", reasoning: true, contextWindow: 1048576, maxTokens: 65535 },
+  { id: "gemini-3.5-flash-preview", name: "Gemini CLI Gemini 3.5 Flash Preview", reasoning: true, contextWindow: 1048576, maxTokens: 65536 },
+  { id: "gemini-cli-3.5-pro-preview", name: "Gemini CLI Gemini 3.5 Pro Preview (explicit)", reasoning: true, contextWindow: 1048576, maxTokens: 65535 },
+  { id: "gemini-cli-3.5-flash-preview", name: "Gemini CLI Gemini 3.5 Flash Preview (explicit)", reasoning: true, contextWindow: 1048576, maxTokens: 65536 },
 ].map((m) => ({ ...m, input: ["text", "image"] as ("text" | "image")[], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }));
 
 export default function (pi: ExtensionAPI) {
+  // Warn about Gemini CLI separate quota deprecation on startup
+  console.log("\x1b[33m[Antigravity] Note: Gemini CLI separate quota might be deprecated in the future. Check README for more info.\x1b[0m\n");
+
+  // Emphasize login procedure on startup if no accounts exist
+  readAccounts().then(storage => {
+    if (!storage.accounts || storage.accounts.length === 0) {
+      console.log("\x1b[1m\x1b[35m[Antigravity Auth]\x1b[0m Please authenticate: run \x1b[32m/login antigravity\x1b[0m or \x1b[32m/antigravity-import-opencode\x1b[0m in Pi.\n");
+    }
+  }).catch(() => {
+    console.log("\x1b[1m\x1b[35m[Antigravity Auth]\x1b[0m Please authenticate: run \x1b[32m/login antigravity\x1b[0m or \x1b[32m/antigravity-import-opencode\x1b[0m in Pi.\n");
+  });
+
   pi.registerProvider("antigravity", {
     name: "Google Antigravity",
     baseUrl: "https://cloudcode-pa.googleapis.com",
@@ -463,7 +535,12 @@ export default function (pi: ExtensionAPI) {
     description: "Import opencode-antigravity-auth accounts into Pi",
     handler: async (_args, ctx) => {
       const text = await fs.readFile(OPENCODE_ACCOUNTS_PATH, "utf8");
-      await writeAccounts(JSON.parse(text));
+      const imported = JSON.parse(text);
+      await mutateAccounts((s) => {
+        s.accounts = imported.accounts;
+        s.activeIndex = imported.activeIndex;
+        s.version = imported.version;
+      });
       const s = await readAccounts();
       ctx.ui.notify(`Imported ${s.accounts.length} Antigravity account(s) from opencode.`, "info");
     },
