@@ -12,6 +12,7 @@ Pi Coding Agent provider extension for Google Antigravity OAuth models, plus Gem
 - Dual quota system:
   - Antigravity quota
   - Gemini CLI quota (Gemini-only; **Note:** This quota might be discontinued/unsupported in the future as Google transitions fully from Gemini CLI to the unified Antigravity CLI architecture)
+- Auto Quota: Intelligent automatic load balancing and fallback between Antigravity and Gemini CLI quota pools
 - Multi-account rotation
 - Real-time SSE streaming with tool calls and thinking blocks
 - Variant-style thinking control
@@ -91,8 +92,8 @@ Additional Gemini CLI preview models are also registered for the separate Gemini
 | `gpt-oss-120b-medium` | Antigravity quota |
 | `gemini-3.5-pro-preview` | Gemini CLI quota |
 | `gemini-3.5-flash-preview` | Gemini CLI quota |
-| `gemini-cli-3.5-pro-preview` | Explicit Gemini CLI quota |
-| `gemini-cli-3.5-flash-preview` | Explicit Gemini CLI quota |
+| `gemini-cli-3.5-pro-preview` | Gemini CLI quota |
+| `gemini-cli-3.5-flash-preview` | Gemini CLI quota |
 
 ## Model variants
 
