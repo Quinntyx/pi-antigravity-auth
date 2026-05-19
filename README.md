@@ -27,7 +27,36 @@ Pi Coding Agent provider extension for Google Antigravity OAuth models, plus Gem
 
 ### 1. Installation
 
-#### For humans
+#### Agent install
+
+Copy and paste the text block below directly into your Pi chat. The Pi coding agent will automatically download and install the extension, then show you the commands to authenticate:
+
+```text
+Please install the `pi-antigravity-auth` extension. Run the following command in the terminal to download and install it:
+
+pi install git:github.com/WindowsRefundDay/pi-antigravity-auth
+
+After the installation command finishes successfully, tell me to run these commands in the chat to complete the authentication:
+1. `/reload` (to reload the environment and load the new extension)
+2. `/login antigravity` (to authenticate via Google OAuth)
+```
+
+<!--
+🤖 AGENT INSTRUCTIONS:
+You are an AI assistant helping the user install the `pi-antigravity-auth` extension for their Pi environment.
+Follow these steps strictly:
+
+1. **INSTALLATION**: Run the following terminal command to install the extension from GitHub:
+   `pi install git:github.com/WindowsRefundDay/pi-antigravity-auth`
+
+2. **USER HANDOFF**: Because you cannot execute interactive slash commands or complete browser OAuth flows yourself, you MUST stop here. In your final response, explicitly instruct the user to run the following two commands in their chat/terminal to complete setup:
+   - Type `/reload` to restart the Pi environment.
+   - Type `/login antigravity` to open the Google OAuth browser window and authenticate.
+
+Do not attempt to run the slash commands yourself. Provide them as text for the user to run.
+-->
+
+#### Normal install
 Run the installation command in your terminal:
 ```bash
 pi install git:github.com/WindowsRefundDay/pi-antigravity-auth
@@ -36,27 +65,6 @@ Then restart your Pi environment:
 ```text
 /reload
 ```
-
-#### For an AI agent
-Paste this request to automate installation:
-```text
-I want to install the pi-antigravity-auth extension for Pi. Please read the README at https://github.com/WindowsRefundDay/pi-antigravity-auth (or fetch https://raw.githubusercontent.com/WindowsRefundDay/pi-antigravity-auth/main/README.md), locate the hidden "🤖 AGENT INSTRUCTIONS" block, and follow the exact step-by-step installation flow described there.
-```
-
-<!--
-🤖 AGENT INSTRUCTIONS:
-You are an AI assistant helping the user install the `pi-antigravity-auth` extension for their Pi environment. 
-Follow these steps strictly:
-
-1. **INSTALLATION**: First, run the following terminal command to install the package from GitHub:
-   `pi install git:github.com/WindowsRefundDay/pi-antigravity-auth` 
-
-2. **USER HANDOFF**: Because you cannot execute interactive slash commands or complete browser OAuth flows yourself, you MUST stop here. In your final response, explicitly instruct the user to run the following two commands in their chat/terminal:
-   - Type `/reload` to restart the Pi environment.
-   - Type `/login antigravity` to open the Google OAuth browser window and authenticate.
-
-Do not attempt to run the slash commands yourself. Only provide them as text for the user to execute.
--->
 
 ### 2. Authentication
 
