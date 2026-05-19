@@ -1,4 +1,8 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type {
+  ExtensionAPI,
+  SessionStartEvent,
+  ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 import { lock } from "proper-lockfile";
 import {
   calculateCost,
@@ -7,7 +11,14 @@ import {
   type Context,
   type Model,
   type SimpleStreamOptions,
+  type OAuthCredentials,
+  type OAuthLoginCallbacks,
 } from "@earendil-works/pi-ai";
+
+type MessageEndEvent = {
+  type: "message_end";
+  message: AssistantMessage;
+};
 import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -83,6 +94,7 @@ const accessCache = new Map<string, Access>();
 const refreshPromises = new Map<string, Promise<string>>();
 let roundRobin = 0;
 let toolCallCounter = 0;
+let mutationPromise = Promise.resolve();
 
 function b64url(buf: Buffer) {
   return buf.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
@@ -98,27 +110,33 @@ async function readAccounts(): Promise<AccountStorage> {
 }
 async function writeAccounts(storage: AccountStorage) {
   await fs.mkdir(dirname(ACCOUNTS_PATH), { recursive: true });
-  await fs.writeFile(ACCOUNTS_PATH, JSON.stringify(storage, null, 2), { mode: 0o600 });
+  const tmpPath = `${ACCOUNTS_PATH}.${randomBytes(8).toString("hex")}.tmp`;
+  await fs.writeFile(tmpPath, JSON.stringify(storage, null, 2), { mode: 0o600 });
+  await fs.rename(tmpPath, ACCOUNTS_PATH);
   try {
     const gi = join(dirname(ACCOUNTS_PATH), ".gitignore");
     const old = await fs.readFile(gi, "utf8").catch(() => "");
     if (!old.split(/\r?\n/).includes("antigravity-accounts.json")) await fs.appendFile(gi, `${old.endsWith("\n") || !old ? "" : "\n"}antigravity-accounts.json\n`);
   } catch {}
 }
-async function mutateAccounts(modifier: (storage: AccountStorage) => void | Promise<void>) {
-  await fs.mkdir(dirname(ACCOUNTS_PATH), { recursive: true });
-  await fs.appendFile(ACCOUNTS_PATH, "").catch(() => {});
-  let release;
-  try {
-    release = await lock(ACCOUNTS_PATH, { retries: { retries: 5, factor: 2, minTimeout: 100, maxTimeout: 1000 } });
-    const storage = await readAccounts();
-    await modifier(storage);
-    await writeAccounts(storage);
-  } catch (err) {
-    console.error("[Antigravity] Failed to acquire lock for accounts", err);
-  } finally {
-    if (release) await release();
-  }
+async function mutateAccounts(modifier: (storage: AccountStorage) => void | Promise<void>): Promise<void> {
+  const result = mutationPromise.then(async () => {
+    await fs.mkdir(dirname(ACCOUNTS_PATH), { recursive: true });
+    await fs.appendFile(ACCOUNTS_PATH, "").catch(() => {});
+    let release;
+    try {
+      release = await lock(ACCOUNTS_PATH, { retries: { retries: 10, factor: 1.5, minTimeout: 50, maxTimeout: 500 } });
+      const storage = await readAccounts();
+      await modifier(storage);
+      await writeAccounts(storage);
+    } catch (err) {
+      console.error("[Antigravity] Failed to acquire lock for accounts", err);
+    } finally {
+      if (release) await release();
+    }
+  });
+  mutationPromise = result.catch(() => {});
+  return result;
 }
 async function readConfig(): Promise<AntigravityConfig> {
   try {
@@ -374,17 +392,23 @@ async function streamSse(response: Response, stream: any, output: AssistantMessa
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buf = "";
+
+  const onAbort = () => {
+    reader.cancel().catch(() => {});
+  };
+
+  if (signal) {
+    if (signal.aborted) {
+      onAbort();
+      throw new Error("Aborted");
+    }
+    signal.addEventListener("abort", onAbort);
+  }
+
   try {
     while (true) {
-      if (signal?.aborted) {
-        throw new Error("Aborted");
-      }
       const { done, value } = await reader.read();
       if (done) break;
-      if (signal?.aborted) {
-        await reader.cancel();
-        throw new Error("Aborted");
-      }
       buf += decoder.decode(value, { stream: true });
       let idx;
       while ((idx = buf.indexOf("\n")) >= 0) {
@@ -396,9 +420,21 @@ async function streamSse(response: Response, stream: any, output: AssistantMessa
         handleChunk(stream, output, state, JSON.parse(data));
       }
     }
+    // Parse trailing non-newline terminated lines if present
+    if (buf.trim().startsWith("data:")) {
+      const line = buf.trim();
+      const data = line.slice(5).trim();
+      if (data && data !== "[DONE]") {
+        handleChunk(stream, output, state, JSON.parse(data));
+      }
+    }
   } catch (err) {
     await reader.cancel().catch(() => {});
     throw err;
+  } finally {
+    if (signal) {
+      signal.removeEventListener("abort", onAbort);
+    }
   }
 }
 function streamAntigravity(model: Model<any>, context: Context, options?: SimpleStreamOptions) {
@@ -421,10 +457,14 @@ function streamAntigravity(model: Model<any>, context: Context, options?: Simple
       const family = isGeminiModel(model.id) ? "gemini" : "claude";
       let lastError: any;
       for (const style of quotaStylesFor(model.id, config)) {
+        let isFirstAttempt = true;
         for (const accountIndex of accountOrder(storage, `${family}:${style}`, config)) {
           const account = storage.accounts[accountIndex];
           try {
-            await new Promise(r => setTimeout(r, 50 + Math.random() * 200)); // Jitter
+            if (!isFirstAttempt) {
+              await new Promise(r => setTimeout(r, 50 + Math.random() * 200)); // Jitter only on fallback retries
+            }
+            isFirstAttempt = false;
             const access = await refreshAccess(account);
             const project = effectiveProject(account);
             for (const endpoint of endpointsFor(style)) {
@@ -434,6 +474,7 @@ function streamAntigravity(model: Model<any>, context: Context, options?: Simple
               if (account.assignedUserAgent) h.set("User-Agent", account.assignedUserAgent);
               const res = await fetch(prepared.request, { ...prepared.init, headers: h });
               if (res.status === 429) { 
+                await res.body?.cancel().catch(() => {});
                 await mutateAccounts((s) => {
                   const a = s.accounts.find(x => x.email === account.email);
                   if (a) {
@@ -457,11 +498,11 @@ function streamAntigravity(model: Model<any>, context: Context, options?: Simple
                 const idx = s.accounts.findIndex(x => x.email === account.email);
                 if (idx >= 0) markAccountSuccess(s, `${family}:${style}`, idx, config);
               });
-            endCurrent(stream, output, state);
-            if (output.content.some((b: any) => b.type === "toolCall")) output.stopReason = "toolUse";
-            stream.push({ type: "done", reason: output.stopReason as any, message: output });
-            stream.end();
-            return;
+              endCurrent(stream, output, state);
+              if (output.content.some((b: any) => b.type === "toolCall")) output.stopReason = "toolUse";
+              stream.push({ type: "done", reason: output.stopReason as any, message: output });
+              stream.end();
+              return;
             }
           } catch (e) { lastError = e; }
         }
@@ -496,13 +537,19 @@ async function makeAuthUrl() {
   url.searchParams.set("prompt", "consent");
   return { url: url.toString(), state, verifier };
 }
-async function exchange(code: string, verifier: string) {
+async function exchange(code: string, verifier: string): Promise<OAuthCredentials> {
   const start = Date.now();
   const res = await fetch("https://oauth2.googleapis.com/token", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ client_id: CLIENT_ID, client_secret: CLIENT_SECRET, code, grant_type: "authorization_code", redirect_uri: REDIRECT_URI, code_verifier: verifier }) });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) {
+    await res.body?.cancel().catch(() => {});
+    throw new Error(await res.text());
+  }
   const tok: any = await res.json();
-  const info: any = await fetch("https://www.googleapis.com/oauth2/v1/userinfo?alt=json", { headers: { Authorization: `Bearer ${tok.access_token}` } }).then(r => r.ok ? r.json() : {}).catch(() => ({}));
-  const storage = await readAccounts().catch(() => ({ version: 1, accounts: [], activeIndex: 0 }));
+  const infoRes = await fetch("https://www.googleapis.com/oauth2/v1/userinfo?alt=json", { headers: { Authorization: `Bearer ${tok.access_token}` } });
+  const info = infoRes.ok ? await infoRes.json() : {};
+  if (!infoRes.ok) {
+    await infoRes.body?.cancel().catch(() => {});
+  }
   if (tok.refresh_token) {
     await mutateAccounts((s) => {
       if (!s.accounts.some(a => a.refreshToken === tok.refresh_token || (info.email && a.email === info.email))) {
@@ -536,7 +583,7 @@ const models = [
 
 export default function (pi: ExtensionAPI) {
   // Use session_start event to warn about Gemini CLI separate quota deprecation on startup
-  pi.on("session_start", async (event, ctx) => {
+  pi.on("session_start", async (event: SessionStartEvent, ctx: ExtensionContext) => {
     // Only print warnings and notifications in active UI sessions
     if (ctx.hasUI) {
       ctx.ui.notify("Note: Gemini CLI separate quota might be deprecated in the future. Check README for more info.", "info");
@@ -563,7 +610,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   // Intercept and normalize context length and payload entity errors in stream
-  pi.on("message_end", async (event, ctx) => {
+  pi.on("message_end", async (event: MessageEndEvent, ctx: ExtensionContext) => {
     const message = event.message;
     if (message.role !== "assistant") return;
     if (message.stopReason !== "error") return;
@@ -592,7 +639,7 @@ export default function (pi: ExtensionAPI) {
     streamSimple: streamAntigravity,
     oauth: {
       name: "Google Antigravity OAuth",
-      async login(callbacks: any) {
+      async login(callbacks: OAuthLoginCallbacks) {
         const auth = await makeAuthUrl();
         callbacks.onAuth({ url: auth.url });
         const pasted = await callbacks.onPrompt({ message: "Paste the localhost redirect URL (or just code= value) after Google login:" });
@@ -600,8 +647,30 @@ export default function (pi: ExtensionAPI) {
         try { code = new URL(code).searchParams.get("code") || code; } catch {}
         return exchange(code, auth.verifier);
       },
-      async refreshToken(credentials: any) { return credentials; },
-      getApiKey(credentials: any) { return credentials.access || "unused"; },
+      async refreshToken(credentials: OAuthCredentials): Promise<OAuthCredentials> {
+        const start = Date.now();
+        const res = await fetch("https://oauth2.googleapis.com/token", {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({
+            grant_type: "refresh_token",
+            refresh_token: credentials.refresh,
+            client_id: CLIENT_ID,
+            client_secret: CLIENT_SECRET,
+          }),
+        });
+        if (!res.ok) {
+          await res.body?.cancel().catch(() => {});
+          throw new Error(`Google OAuth refresh failed (${res.status}): ${await res.text().catch(() => "")}`);
+        }
+        const json: any = await res.json();
+        return {
+          refresh: json.refresh_token || credentials.refresh,
+          access: json.access_token,
+          expires: start + (json.expires_in ?? 3600) * 1000,
+        };
+      },
+      getApiKey(credentials: OAuthCredentials) { return credentials.access || "unused"; },
     },
   });
 
