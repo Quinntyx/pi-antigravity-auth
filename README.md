@@ -11,7 +11,7 @@ Pi Coding Agent provider extension for Google Antigravity OAuth models, plus Gem
 - Google OAuth sign-in with automatic token refresh
 - Dual quota system:
   - Antigravity quota
-  - Gemini CLI quota (Gemini-only)
+  - Gemini CLI quota (Gemini-only; **Note:** This quota might be discontinued/unsupported in the future as Google transitions fully from Gemini CLI to the unified Antigravity CLI architecture)
 - Multi-account rotation
 - Real-time SSE streaming with tool calls and thinking blocks
 - Variant-style thinking control
@@ -37,8 +37,23 @@ Then reload Pi:
 Paste this into an agent:
 
 ```text
-Install pi-antigravity-auth from GitHub, enable the antigravity provider, and keep the existing README structure and config documentation consistent with the upstream Antigravity auth project.
+I want to install the pi-antigravity-auth extension for Pi. Please read the README at https://github.com/WindowsRefundDay/pi-antigravity-auth (or fetch https://raw.githubusercontent.com/WindowsRefundDay/pi-antigravity-auth/main/README.md), locate the hidden "🤖 AGENT INSTRUCTIONS" block, and follow the exact step-by-step installation flow described there.
 ```
+
+<!--
+🤖 AGENT INSTRUCTIONS:
+You are an AI assistant helping the user install the `pi-antigravity-auth` extension for their Pi environment. 
+Follow these steps strictly:
+
+1. **INSTALLATION**: First, run the following terminal command to install the package from GitHub:
+   `pi install git:github.com/WindowsRefundDay/pi-antigravity-auth` 
+
+2. **USER HANDOFF**: Because you cannot execute interactive slash commands or complete browser OAuth flows yourself, you MUST stop here. In your final response, explicitly instruct the user to run the following two commands in their chat/terminal:
+   - Type `/reload` to restart the Pi environment.
+   - Type `/login antigravity` to open the Google OAuth browser window and authenticate.
+
+Do not attempt to run the slash commands yourself. Only provide them as text for the user to execute.
+-->
 
 ## Models
 
@@ -51,9 +66,9 @@ pi --list-models antigravity
 Common models matching the Antigravity picker:
 
 ```bash
-pi --provider antigravity --model gemini-3.1-pro-high
-pi --provider antigravity --model gemini-3.1-pro-low
-pi --provider antigravity --model gemini-3-flash
+pi --provider antigravity --model gemini-3.5-pro-high
+pi --provider antigravity --model gemini-3.5-pro-low
+pi --provider antigravity --model gemini-3.5-flash
 pi --provider antigravity --model claude-sonnet-4-6-thinking
 pi --provider antigravity --model claude-opus-4-6-thinking
 pi --provider antigravity --model gpt-oss-120b-medium
@@ -61,20 +76,23 @@ pi --provider antigravity --model gpt-oss-120b-medium
 
 Additional Gemini CLI preview models are also registered for the separate Gemini CLI quota.
 
+> [!WARNING]
+> **Deprecation Notice:** Following Google's official announcement transitioning from Gemini CLI to Antigravity CLI, the classic Gemini CLI and its separate quota are expected to be discontinued or restricted to enterprise customers via paid platform APIs. Consequently, the separate `Gemini CLI quota` models may become completely unsupported or cease to function in future releases. We highly recommend migrating your active workflows to the main `Antigravity quota` models.
+
 ### Available models
 
 | Model | Notes |
 |---|---|
-| `gemini-3.1-pro-high` | Antigravity quota |
-| `gemini-3.1-pro-low` | Antigravity quota |
-| `gemini-3-flash` | Antigravity quota |
+| `gemini-3.5-pro-high` | Antigravity quota |
+| `gemini-3.5-pro-low` | Antigravity quota |
+| `gemini-3.5-flash` | Antigravity quota |
 | `claude-sonnet-4-6-thinking` | Antigravity quota |
 | `claude-opus-4-6-thinking` | Antigravity quota |
 | `gpt-oss-120b-medium` | Antigravity quota |
-| `gemini-3-pro-preview` | Gemini CLI quota |
-| `gemini-3-flash-preview` | Gemini CLI quota |
-| `gemini-cli-3-pro-preview` | Explicit Gemini CLI quota |
-| `gemini-cli-3-flash-preview` | Explicit Gemini CLI quota |
+| `gemini-3.5-pro-preview` | Gemini CLI quota |
+| `gemini-3.5-flash-preview` | Gemini CLI quota |
+| `gemini-cli-3.5-pro-preview` | Explicit Gemini CLI quota |
+| `gemini-cli-3.5-flash-preview` | Explicit Gemini CLI quota |
 
 ## Model variants
 
@@ -83,8 +101,8 @@ Variants let you change thinking mode/level per model.
 Examples:
 
 ```bash
-pi --provider antigravity --model gemini-3.1-pro-high
-pi --provider antigravity --model gemini-3.1-pro-low
+pi --provider antigravity --model gemini-3.5-pro-high
+pi --provider antigravity --model gemini-3.5-pro-low
 pi --provider antigravity --model claude-opus-4-6-thinking
 ```
 
