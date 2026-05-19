@@ -67,6 +67,18 @@ const DEFAULT_CONFIG: AntigravityConfig = {
   quiet: false,
 };
 
+const CONFIG_MAPPING: Record<string, keyof AntigravityConfig> = {
+  strategy: "accountSelectionStrategy",
+  accountSelectionStrategy: "accountSelectionStrategy",
+  rotate: "rotateAccounts",
+  rotateAccounts: "rotateAccounts",
+  quota: "geminiQuota",
+  geminiQuota: "geminiQuota",
+  fallback: "quotaFallback",
+  quotaFallback: "quotaFallback",
+  quiet: "quiet",
+};
+
 const accessCache = new Map<string, Access>();
 const refreshPromises = new Map<string, Promise<string>>();
 let roundRobin = 0;
@@ -111,7 +123,14 @@ async function mutateAccounts(modifier: (storage: AccountStorage) => void | Prom
 async function readConfig(): Promise<AntigravityConfig> {
   try {
     const raw = JSON.parse(await fs.readFile(CONFIG_PATH, "utf8"));
-    return { ...DEFAULT_CONFIG, ...raw };
+    const config = { ...DEFAULT_CONFIG };
+    for (const [key, value] of Object.entries(raw)) {
+      const resolvedKey = CONFIG_MAPPING[key];
+      if (resolvedKey) {
+        (config as any)[resolvedKey] = value;
+      }
+    }
+    return config;
   } catch {
     return { ...DEFAULT_CONFIG };
   }
@@ -606,7 +625,7 @@ export default function (pi: ExtensionAPI) {
       const s = await readAccounts();
       const c = await readConfig();
       ctx.ui.notify([
-        `Config: strategy=${c.accountSelectionStrategy}, rotate=${c.rotateAccounts}, geminiQuota=${c.geminiQuota}, quotaFallback=${c.quotaFallback}`,
+        `Config: strategy=${c.accountSelectionStrategy}, rotate=${c.rotateAccounts}, quota=${c.geminiQuota}, fallback=${c.quotaFallback}`,
         `Active index: ${s.activeIndex ?? 0}`,
         ...s.accounts.map((a, i) => `${i + 1}. ${a.email || "(no email)"}${a.lastUsed ? ` lastUsed=${new Date(a.lastUsed).toLocaleString()}` : ""}`),
       ].join("\n") || "No accounts imported", "info");
@@ -615,12 +634,12 @@ export default function (pi: ExtensionAPI) {
   pi.registerCommand("antigravity-config", {
     description: "Show or set Antigravity config. Usage: /antigravity-config key=value ...",
     getArgumentCompletions: (argumentPrefix: string) => {
-      const keys = ["accountSelectionStrategy", "rotateAccounts", "geminiQuota", "quotaFallback", "quiet"];
+      const keys = ["strategy", "rotate", "quota", "fallback", "quiet"];
       const keyValues: Record<string, string[]> = {
-        accountSelectionStrategy: ["round-robin", "random", "sticky"],
-        rotateAccounts: ["true", "false"],
-        geminiQuota: ["auto", "antigravity", "gemini-cli"],
-        quotaFallback: ["true", "false"],
+        strategy: ["round-robin", "random", "sticky"],
+        rotate: ["true", "false"],
+        quota: ["auto", "antigravity", "gemini-cli"],
+        fallback: ["true", "false"],
         quiet: ["true", "false"],
       };
 
@@ -661,22 +680,46 @@ export default function (pi: ExtensionAPI) {
       const config = await readConfig();
       const trimmed = args.trim();
       if (!trimmed) {
-        ctx.ui.notify(`${CONFIG_PATH}\n${JSON.stringify(config, null, 2)}`, "info");
+        ctx.ui.notify(
+          `Antigravity Configuration:\n` +
+          `• strategy: ${config.accountSelectionStrategy} (round-robin | random | sticky)\n` +
+          `• rotate: ${config.rotateAccounts} (true | false)\n` +
+          `• quota: ${config.geminiQuota} (auto | antigravity | gemini-cli)\n` +
+          `• fallback: ${config.quotaFallback} (true | false)\n` +
+          `• quiet: ${config.quiet} (true | false)\n\n` +
+          `Saved in: ${CONFIG_PATH}\n` +
+          `To modify, use: /antigravity-config <option>=<value>\n` +
+          `Example: /antigravity-config strategy=sticky rotate=false`,
+          "info"
+        );
         return;
       }
       for (const part of trimmed.split(/\s+/)) {
-        const [key, rawValue] = part.split("=");
+        const [rawKey, rawValue] = part.split("=");
         const value = rawValue?.trim();
-        if (!key || value === undefined) continue;
+        if (!rawKey || value === undefined) continue;
+        const key = CONFIG_MAPPING[rawKey];
+        if (!key) {
+          ctx.ui.notify(`Unknown/invalid config option: ${part}`, "warning");
+          continue;
+        }
         if (key === "accountSelectionStrategy" && ["round-robin", "random", "sticky"].includes(value)) config.accountSelectionStrategy = value as any;
         else if (key === "rotateAccounts") config.rotateAccounts = /^(1|true|yes|on)$/i.test(value);
         else if (key === "geminiQuota" && ["auto", "antigravity", "gemini-cli"].includes(value)) config.geminiQuota = value as any;
         else if (key === "quotaFallback") config.quotaFallback = /^(1|true|yes|on)$/i.test(value);
         else if (key === "quiet") config.quiet = /^(1|true|yes|on)$/i.test(value);
-        else ctx.ui.notify(`Unknown/invalid config option: ${part}`, "warning");
+        else ctx.ui.notify(`Invalid value for ${rawKey}: ${value}`, "warning");
       }
       await writeConfig(config);
-      ctx.ui.notify(`Saved ${CONFIG_PATH}\n${JSON.stringify(config, null, 2)}`, "info");
+      ctx.ui.notify(
+        `Antigravity Configuration Saved:\n` +
+        `• strategy: ${config.accountSelectionStrategy}\n` +
+        `• rotate: ${config.rotateAccounts}\n` +
+        `• quota: ${config.geminiQuota}\n` +
+        `• fallback: ${config.quotaFallback}\n` +
+        `• quiet: ${config.quiet}`,
+        "info"
+      );
     },
   });
 }
