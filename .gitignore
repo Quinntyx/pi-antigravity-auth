@@ -22,3 +22,4 @@ antigravity.json
 certs/
 secrets.json
 *.secret
+dist/
