@@ -24,12 +24,14 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { randomBytes, createHash } from "node:crypto";
 import { prepareAntigravityRequest, transformAntigravityResponse } from "opencode-antigravity-auth/dist/src/plugin/request.js";
+import { checkAccountsQuota } from "opencode-antigravity-auth/dist/src/plugin/quota.js";
 import {
   ANTIGRAVITY_CLIENT_ID,
   ANTIGRAVITY_CLIENT_SECRET,
   ANTIGRAVITY_REDIRECT_URI,
   ANTIGRAVITY_SCOPES,
   getRandomizedHeaders,
+  setAntigravityVersion,
   SKIP_THOUGHT_SIGNATURE,
 } from "opencode-antigravity-auth/dist/src/constants.js";
 
@@ -37,6 +39,8 @@ const CLIENT_ID = process.env.PI_ANTIGRAVITY_CLIENT_ID || ANTIGRAVITY_CLIENT_ID;
 const CLIENT_SECRET = process.env.PI_ANTIGRAVITY_CLIENT_SECRET || ANTIGRAVITY_CLIENT_SECRET;
 const REDIRECT_URI = process.env.PI_ANTIGRAVITY_REDIRECT_URI || ANTIGRAVITY_REDIRECT_URI;
 const SCOPES = ANTIGRAVITY_SCOPES;
+const ANTIGRAVITY_PLUGIN_VERSION = process.env.PI_ANTIGRAVITY_PLUGIN_VERSION || "1.25.0";
+setAntigravityVersion(ANTIGRAVITY_PLUGIN_VERSION);
 const ACCOUNTS_PATH = join(homedir(), ".pi", "agent", "antigravity-accounts.json");
 const CONFIG_PATH = join(homedir(), ".pi", "agent", "antigravity.json");
 const OPENCODE_ACCOUNTS_PATH = join(homedir(), ".config", "opencode", "antigravity-accounts.json");
@@ -59,6 +63,7 @@ type Account = {
   cooldownUntil?: number;
   failureCount?: number;
   assignedUserAgent?: string;
+  enabled?: boolean;
 };
 type AccountStorage = { version: number; accounts: Account[]; activeIndex?: number; activeIndexByFamily?: Record<string, number> };
 type Access = { token: string; expires: number };
@@ -69,6 +74,7 @@ type AntigravityConfig = {
   geminiQuota: "auto" | "antigravity" | "gemini-cli";
   quotaFallback: boolean;
   quiet: boolean;
+  initialCooldownMs: number;
 };
 const DEFAULT_CONFIG: AntigravityConfig = {
   accountSelectionStrategy: "round-robin",
@@ -76,6 +82,7 @@ const DEFAULT_CONFIG: AntigravityConfig = {
   geminiQuota: "auto",
   quotaFallback: true,
   quiet: false,
+  initialCooldownMs: 2000,
 };
 
 const CONFIG_MAPPING: Record<string, keyof AntigravityConfig> = {
@@ -88,6 +95,8 @@ const CONFIG_MAPPING: Record<string, keyof AntigravityConfig> = {
   fallback: "quotaFallback",
   quotaFallback: "quotaFallback",
   quiet: "quiet",
+  cooldown: "initialCooldownMs",
+  initialCooldownMs: "initialCooldownMs",
 };
 
 const accessCache = new Map<string, Access>();
@@ -106,7 +115,7 @@ async function readAccounts(): Promise<AccountStorage> {
   const text = await fs.readFile(ACCOUNTS_PATH, "utf8").catch(() => "{}");
   const data = JSON.parse(text || "{}");
   const accounts = Array.isArray(data.accounts) ? data.accounts.filter((a: any) => a?.refreshToken) : [];
-  return { version: data.version ?? 1, accounts, activeIndex: data.activeIndex ?? 0 };
+  return { version: data.version ?? 1, accounts, activeIndex: data.activeIndex ?? 0, activeIndexByFamily: data.activeIndexByFamily };
 }
 async function writeAccounts(storage: AccountStorage) {
   await fs.mkdir(dirname(ACCOUNTS_PATH), { recursive: true });
@@ -165,13 +174,19 @@ function quotaStylesFor(modelId: string, config: AntigravityConfig): QuotaStyle[
   if (id.startsWith("antigravity-")) return config.quotaFallback ? ["antigravity", "gemini-cli"] : ["antigravity"];
   if (config.geminiQuota === "gemini-cli") return config.quotaFallback ? ["gemini-cli", "antigravity"] : ["gemini-cli"];
   if (config.geminiQuota === "antigravity") return config.quotaFallback ? ["antigravity", "gemini-cli"] : ["antigravity"];
-  return config.quotaFallback ? ["gemini-cli", "antigravity"] : ["gemini-cli"];
+  return config.quotaFallback ? ["antigravity", "gemini-cli"] : ["antigravity"];
 }
 function endpointsFor(style: QuotaStyle) {
   return style === "gemini-cli" ? ["https://cloudcode-pa.googleapis.com"] : ENDPOINTS;
 }
+function normalizeAntigravityUserAgent(userAgent?: string) {
+  if (!userAgent) return undefined;
+  return userAgent.replace(/\bantigravity\/\d+\.\d+\.\d+\b/i, `antigravity/${ANTIGRAVITY_PLUGIN_VERSION}`);
+}
 function headersFor(style: QuotaStyle, modelId?: string) {
-  return getRandomizedHeaders(style as any, modelId);
+  const headers = getRandomizedHeaders(style as any, modelId);
+  if (style === "antigravity") headers["User-Agent"] = normalizeAntigravityUserAgent(headers["User-Agent"]) || headers["User-Agent"];
+  return headers;
 }
 function accountOrder(storage: AccountStorage, family: string, config: AntigravityConfig): number[] {
   const count = storage.accounts.length;
@@ -201,6 +216,12 @@ function markAccountSuccess(storage: AccountStorage, family: string, index: numb
   storage.activeIndex = next;
   storage.activeIndexByFamily = { ...(storage.activeIndexByFamily || {}), [family]: next };
   roundRobin = next;
+}
+function markAccountFailure(storage: AccountStorage, index: number, cooldownMs = 5 * 60_000) {
+  const account = storage.accounts[index];
+  if (!account) return;
+  account.failureCount = (account.failureCount || 0) + 1;
+  account.cooldownUntil = Date.now() + Math.min(cooldownMs * Math.pow(2, account.failureCount - 1), 60 * 60_000);
 }
 async function refreshAccess(account: Account): Promise<string> {
   const cached = accessCache.get(account.refreshToken);
@@ -299,20 +320,50 @@ function toTools(context: Context) {
 }
 function resolveActualModel(id: string) {
   return id
-    .replace(/^gemini-3\.5-pro-(low|high)$/, "antigravity-gemini-3.5-pro")
-    .replace(/^gemini-3\.5-flash-(low|high)$/, "antigravity-gemini-3.5-flash")
-    .replace(/^gemini-3\.1-pro-(low|high)$/, "antigravity-gemini-3.1-pro")
+    .replace(/^gemini-3\.5-flash$/, "gemini-3.5-flash-medium")
+    .replace(/^gemini-3\.5-pro-preview$/, "gemini-3-pro-preview")
+    .replace(/^gemini-3\.5-flash-preview$/, "gemini-3-flash-preview")
+    .replace(/^gemini-cli-3\.5-pro-preview$/, "gemini-cli-3-pro-preview")
+    .replace(/^gemini-cli-3\.5-flash-preview$/, "gemini-cli-3-flash-preview")
+    .replace(/^gemini-3\.1-pro-(low|high)$/, "antigravity-gemini-3.1-pro-$1")
+    .replace(/^claude-sonnet-4-6-thinking$/, "claude-sonnet-4-6")
     .replace(/^gemini-cli-/, "gemini-")
     .replace(/^antigravity-/, "")
-    .replace(/^gemini-3-pro$/, "gemini-3-pro-low")
-    .replace(/^gemini-3-pro-preview$/, "gemini-3-pro-preview")
-    .replace(/^gemini-3\.5-pro$/, "antigravity-gemini-3.5-pro")
-    .replace(/^gemini-3\.5-flash$/, "antigravity-gemini-3.5-flash");
+    .replace(/^gemini-3-pro$/, "gemini-3-pro-low");
+}
+function patchedEffectiveModel(requested: string, style: QuotaStyle) {
+  const normalized = requested.replace(/^antigravity-/i, "");
+  if (style === "antigravity" && /^gemini-3\.5-flash-(low|medium|high)$/i.test(normalized)) {
+    return normalized;
+  }
+  if (style === "gemini-cli" && /^gemini-3\.5-flash-(low|medium|high)$/i.test(normalized)) {
+    return "gemini-3-flash-preview";
+  }
+  return undefined;
+}
+function patchPreparedModel(prepared: any, effectiveModel?: string) {
+  if (!effectiveModel) return prepared;
+  if (typeof prepared?.request === "string") {
+    prepared.request = prepared.request.replace(/\/(models|companionModels)\/[^:]+:/, `/$1/${encodeURIComponent(effectiveModel)}:`);
+  }
+  if (typeof prepared?.init?.body !== "string") return prepared;
+  try {
+    const body = JSON.parse(prepared.init.body);
+    body.model = effectiveModel;
+    if (body.request?.sessionId && typeof body.request.sessionId === "string") {
+      body.request.sessionId = body.request.sessionId.replace(/:gemini-3\.5-flash(-low|-medium|-high)?:/i, `:${effectiveModel}:`);
+    }
+    prepared.init.body = JSON.stringify(body);
+    prepared.effectiveModel = effectiveModel;
+  } catch {}
+  return prepared;
 }
 function thinkingConfig(id: string, reasoning?: string) {
   const lower = id.toLowerCase();
-  const level = reasoning === "high" || reasoning === "xhigh" ? "high" : reasoning === "medium" ? "medium" : "low";
-  if (lower.includes("gemini-3") || lower.includes("gemini-2.5")) return { includeThoughts: true, thinkingLevel: level.toUpperCase() };
+  const suffixLevel = lower.match(/-(minimal|low|medium|high)$/)?.[1];
+  const level = reasoning === "high" || reasoning === "xhigh" ? "high" : reasoning === "medium" ? "medium" : suffixLevel || "low";
+  if (lower.includes("gemini-3") || lower.includes("gemini-2.5")) return { includeThoughts: true, thinkingLevel: level };
+  if (lower === "claude-sonnet-4-6") return undefined;
   if (lower.includes("claude") && lower.includes("thinking")) return { include_thoughts: true, thinking_budget: level === "high" ? 32768 : level === "medium" ? 16384 : 8192 };
   return undefined;
 }
@@ -468,10 +519,11 @@ function streamAntigravity(model: Model<any>, context: Context, options?: Simple
             const access = await refreshAccess(account);
             const project = effectiveProject(account);
             for (const endpoint of endpointsFor(style)) {
-              const prepared: any = prepareAntigravityRequest(fakeInput, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal: options?.signal }, access, project, endpoint, style, false, { claudeToolHardening: true });
+              const effectiveModel = patchedEffectiveModel(requested, style);
+              const prepared: any = patchPreparedModel(prepareAntigravityRequest(fakeInput, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal: options?.signal }, access, project, endpoint, style, false, { claudeToolHardening: true }), effectiveModel);
               const h = new Headers(prepared.init.headers || {});
               for (const [k, v] of Object.entries(headersFor(style, model.id))) h.set(k, v);
-              if (account.assignedUserAgent) h.set("User-Agent", account.assignedUserAgent);
+              if (account.assignedUserAgent) h.set("User-Agent", normalizeAntigravityUserAgent(account.assignedUserAgent) || account.assignedUserAgent);
               const res = await fetch(prepared.request, { ...prepared.init, headers: h });
               if (res.status === 429) { 
                 await res.body?.cancel().catch(() => {});
@@ -479,17 +531,23 @@ function streamAntigravity(model: Model<any>, context: Context, options?: Simple
                   const a = s.accounts.find(x => x.email === account.email);
                   if (a) {
                     a.failureCount = (a.failureCount || 0) + 1;
-                    const backoffMs = Math.min(30000 * Math.pow(2, a.failureCount - 1), 3600000);
+                    const backoffMs = Math.min(config.initialCooldownMs * Math.pow(2, a.failureCount - 1), 3600000);
                     a.cooldownUntil = Date.now() + backoffMs;
                   }
                 });
-                const backoffMs = Math.min(30000 * Math.pow(2, (account.failureCount || 0)), 3600000);
+                const backoffMs = Math.min(config.initialCooldownMs * Math.pow(2, (account.failureCount || 0)), 3600000);
                 lastError = new Error(`${style} quota rate limited: ${account.email || "account"} (Cooldown: ${backoffMs/1000}s)`); 
                 break; 
               }
-              const transformed = await transformAntigravityResponse(res, true, undefined, requested, project, endpoint, prepared.effectiveModel, prepared.sessionId);
+              const transformed = await transformAntigravityResponse(res, true, undefined, requested, project, endpoint, effectiveModel || prepared.effectiveModel, prepared.sessionId);
               if (!transformed.ok) {
-                lastError = new Error(`${style} ${transformed.status}: ${await transformed.text().catch(() => "")}`);
+                const errorText = await transformed.text().catch(() => "");
+                lastError = new Error(`${style} ${transformed.status}: ${errorText}`);
+                if (/invalid_grant|account has been deleted|unauthorized|verify your account/i.test(errorText)) {
+                  await mutateAccounts((s) => markAccountFailure(s, accountIndex, 15 * 60_000));
+                }
+                const isModelUnavailable = transformed.status === 400 && /invalid argument|requested model/i.test(errorText);
+                if (isModelUnavailable) break; // skip remaining endpoints; try next account
                 if ([403, 404, 429, 500, 502, 503, 504].includes(transformed.status)) continue;
                 throw lastError;
               }
@@ -504,8 +562,19 @@ function streamAntigravity(model: Model<any>, context: Context, options?: Simple
               stream.end();
               return;
             }
-          } catch (e) { lastError = e; }
+          } catch (e) {
+            lastError = e;
+            const message = e instanceof Error ? e.message : String(e);
+            if (/invalid_grant|account has been deleted|unauthorized|verify your account/i.test(message)) {
+              await mutateAccounts((s) => markAccountFailure(s, accountIndex, 30 * 60_000));
+            }
+          }
         }
+      }
+      const now = Date.now();
+      const healthyAccounts = storage.accounts.filter(a => !a.cooldownUntil || a.cooldownUntil < now);
+      if (storage.accounts.length > 0 && healthyAccounts.length === 0) {
+        throw new Error("All accounts are currently in rate-limit cooldown. Please wait a few seconds for limits to clear.");
       }
       throw lastError || new Error("All Antigravity/Gemini CLI accounts and quotas failed");
     } catch (e) {
@@ -555,9 +624,7 @@ async function exchange(code: string, verifier: string): Promise<OAuthCredential
       if (!s.accounts.some(a => a.refreshToken === tok.refresh_token || (info.email && a.email === info.email))) {
         const macVersions = ["14_0", "14_1_2", "14_2", "14_3_1", "14_4", "14_4_1", "14_5", "15_0", "15_1"];
         const osVer = macVersions[Math.floor(Math.random() * macVersions.length)];
-        const plugins = ["1.23.2", "1.23.1", "1.22.0", "1.24.0", "1.25.0"];
-        const pluginVer = plugins[Math.floor(Math.random() * plugins.length)];
-        const assignedUserAgent = `antigravity/${pluginVer} darwin/arm64 Mac OS X ${osVer}`;
+        const assignedUserAgent = `antigravity/${ANTIGRAVITY_PLUGIN_VERSION} darwin/arm64 Mac OS X ${osVer}`;
         s.accounts.push({ email: info.email, refreshToken: tok.refresh_token, addedAt: Date.now(), lastUsed: Date.now(), assignedUserAgent });
       }
     });
@@ -566,19 +633,24 @@ async function exchange(code: string, verifier: string): Promise<OAuthCredential
 }
 
 const models = [
-  // Antigravity model picker models (upgraded to Gemini 3.5 and Claude 4.6)
-  { id: "gemini-3.5-pro-high", name: "Gemini 3.5 Pro (High)", reasoning: true, contextWindow: 1048576, maxTokens: 65535 },
-  { id: "gemini-3.5-pro-low", name: "Gemini 3.5 Pro (Low)", reasoning: true, contextWindow: 1048576, maxTokens: 65535 },
-  { id: "gemini-3.5-flash", name: "Gemini 3.5 Flash", reasoning: true, contextWindow: 1048576, maxTokens: 65536 },
+  // Antigravity model picker models
+  { id: "gemini-3.5-flash-high", name: "Gemini 3.5 Flash (High)", reasoning: true, contextWindow: 1048576, maxTokens: 65536 },
+  { id: "gemini-3.5-flash-medium", name: "Gemini 3.5 Flash (Medium)", reasoning: true, contextWindow: 1048576, maxTokens: 65536 },
+  { id: "gemini-3.5-flash-low", name: "Gemini 3.5 Flash (Low)", reasoning: true, contextWindow: 1048576, maxTokens: 65536 },
+  { id: "gemini-3.1-pro-high", name: "Gemini 3.1 Pro (High)", reasoning: true, contextWindow: 1048576, maxTokens: 65535 },
+  { id: "gemini-3.1-pro-low", name: "Gemini 3.1 Pro (Low)", reasoning: true, contextWindow: 1048576, maxTokens: 65535 },
+  { id: "gemini-3-flash", name: "Gemini 3 Flash", reasoning: true, contextWindow: 1048576, maxTokens: 65536 },
   { id: "claude-sonnet-4-6-thinking", name: "Claude Sonnet 4.6 (Thinking)", reasoning: true, contextWindow: 200000, maxTokens: 64000 },
   { id: "claude-opus-4-6-thinking", name: "Claude Opus 4.6 (Thinking)", reasoning: true, contextWindow: 200000, maxTokens: 64000 },
   { id: "gpt-oss-120b-medium", name: "GPT-OSS 120B (Medium)", reasoning: true, contextWindow: 200000, maxTokens: 64000 },
 
   // Extra Gemini CLI quota models (Gemini-only, separate quota from Antigravity)
-  { id: "gemini-3.5-pro-preview", name: "Gemini CLI Gemini 3.5 Pro Preview", reasoning: true, contextWindow: 1048576, maxTokens: 65535 },
-  { id: "gemini-3.5-flash-preview", name: "Gemini CLI Gemini 3.5 Flash Preview", reasoning: true, contextWindow: 1048576, maxTokens: 65536 },
-  { id: "gemini-cli-3.5-pro-preview", name: "Gemini CLI Gemini 3.5 Pro Preview (explicit)", reasoning: true, contextWindow: 1048576, maxTokens: 65535 },
-  { id: "gemini-cli-3.5-flash-preview", name: "Gemini CLI Gemini 3.5 Flash Preview (explicit)", reasoning: true, contextWindow: 1048576, maxTokens: 65536 },
+  { id: "gemini-3-pro-preview", name: "Gemini CLI Gemini 3 Pro Preview", reasoning: true, contextWindow: 1048576, maxTokens: 65535 },
+  { id: "gemini-3.1-pro-preview", name: "Gemini CLI Gemini 3.1 Pro Preview", reasoning: true, contextWindow: 1048576, maxTokens: 65535 },
+  { id: "gemini-3-flash-preview", name: "Gemini CLI Gemini 3 Flash Preview", reasoning: true, contextWindow: 1048576, maxTokens: 65536 },
+  { id: "gemini-cli-3-pro-preview", name: "Gemini CLI Gemini 3 Pro Preview (explicit)", reasoning: true, contextWindow: 1048576, maxTokens: 65535 },
+  { id: "gemini-cli-3.1-pro-preview", name: "Gemini CLI Gemini 3.1 Pro Preview (explicit)", reasoning: true, contextWindow: 1048576, maxTokens: 65535 },
+  { id: "gemini-cli-3-flash-preview", name: "Gemini CLI Gemini 3 Flash Preview (explicit)", reasoning: true, contextWindow: 1048576, maxTokens: 65536 },
 ].map((m) => ({ ...m, input: ["text", "image"] as ("text" | "image")[], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }));
 
 export default function (pi: ExtensionAPI) {
@@ -694,22 +766,109 @@ export default function (pi: ExtensionAPI) {
       const s = await readAccounts();
       const c = await readConfig();
       ctx.ui.notify([
-        `Config: strategy=${c.accountSelectionStrategy}, rotate=${c.rotateAccounts}, quota=${c.geminiQuota}, fallback=${c.quotaFallback}`,
+        `Config: strategy=${c.accountSelectionStrategy}, rotate=${c.rotateAccounts}, quota=${c.geminiQuota}, fallback=${c.quotaFallback}, cooldown=${c.initialCooldownMs}ms`,
         `Active index: ${s.activeIndex ?? 0}`,
         ...s.accounts.map((a, i) => `${i + 1}. ${a.email || "(no email)"}${a.lastUsed ? ` lastUsed=${new Date(a.lastUsed).toLocaleString()}` : ""}`),
       ].join("\n") || "No accounts imported", "info");
     },
   });
+  pi.registerCommand("antigravity-quota", {
+    description: "Check Antigravity and Gemini CLI quotas for all accounts",
+    handler: async (_args, ctx) => {
+      const s = await readAccounts();
+      if (!s.accounts.length) {
+        ctx.ui.notify("No accounts imported. Run /login antigravity or /antigravity-import-opencode.", "warning");
+        return;
+      }
+      ctx.ui.notify("Fetching quota status from Google API...", "info");
+      
+      try {
+        const results = await checkAccountsQuota(s.accounts, undefined);
+        const outputLines: string[] = ["=== ANTIGRAVITY QUOTA STATUS ==="];
+        
+        function makeBar(frac?: number) {
+          if (frac === undefined) return "[░░░░░░░░░░] N/A";
+          const filled = Math.round(frac * 10);
+          return `[${"█".repeat(filled)}${"░".repeat(10 - filled)}] ${Math.round(frac * 100)}%`;
+        }
+        
+        function formatReset(resetTime?: string) {
+          if (!resetTime) return "";
+          const ms = Date.parse(resetTime) - Date.now();
+          if (ms <= 0) return " (resetting now)";
+          const mins = Math.ceil(ms / 60000);
+          if (mins < 60) return ` (reset in ${mins}m)`;
+          const hours = Math.floor(mins / 60);
+          const remMins = mins % 60;
+          return ` (reset in ${hours}h ${remMins}m)`;
+        }
+
+        const families = ["claude", "gemini-flash", "gemini-pro"];
+        const familyAggregates: Record<string, { healthy: number, maxFrac: number }> = {
+          claude: { healthy: 0, maxFrac: 0 },
+          "gemini-flash": { healthy: 0, maxFrac: 0 },
+          "gemini-pro": { healthy: 0, maxFrac: 0 }
+        };
+
+        for (const r of results) {
+          outputLines.push("");
+          const emailStr = r.email || `Account ${r.index + 1}`;
+          const activeStr = s.activeIndex === r.index ? " ★ ACTIVE" : "";
+          const statusStr = r.disabled ? " (DISABLED)" : "";
+          outputLines.push(`• ${emailStr}${activeStr}${statusStr}`);
+          
+          if (r.status === "error") {
+            outputLines.push(`  Error: ${r.error || "Unknown authentication error"}`);
+            continue;
+          }
+          
+          outputLines.push("  [Antigravity Quotas]");
+          const groups = r.quota?.groups || {};
+          for (const f of families) {
+            const group = groups[f];
+            const frac = group?.remainingFraction;
+            outputLines.push(`    - ${f.toUpperCase().padEnd(12)}: ${makeBar(frac)}${formatReset(group?.resetTime)}`);
+            if (frac !== undefined) {
+              if (frac > 0) familyAggregates[f].healthy += 1;
+              familyAggregates[f].maxFrac = Math.max(familyAggregates[f].maxFrac, frac);
+            }
+          }
+          
+          const cliModels = r.geminiCliQuota?.models || [];
+          if (cliModels.length > 0) {
+            outputLines.push("  [Gemini CLI Quotas]");
+            for (const m of cliModels) {
+              outputLines.push(`    - ${m.modelId.padEnd(24)}: ${makeBar(m.remainingFraction)}${formatReset(m.resetTime)}`);
+            }
+          }
+        }
+        
+        outputLines.push("");
+        outputLines.push("=== POOL SUMMARY ===");
+        const activeAccountsCount = s.accounts.filter(a => a.enabled !== false).length;
+        outputLines.push(`Total Accounts: ${s.accounts.length} (${activeAccountsCount} enabled)`);
+        for (const f of families) {
+          const agg = familyAggregates[f];
+          outputLines.push(`• ${f.toUpperCase().padEnd(12)}: ${agg.healthy}/${s.accounts.length} healthy accounts (Max ${Math.round(agg.maxFrac * 100)}% remaining)`);
+        }
+        
+        ctx.ui.notify(outputLines.join("\n"), "info");
+      } catch (err) {
+        ctx.ui.notify(`Failed to fetch quotas: ${err instanceof Error ? err.message : String(err)}`, "error");
+      }
+    },
+  });
   pi.registerCommand("antigravity-config", {
     description: "Show or set Antigravity config. Usage: /antigravity-config key=value ...",
     getArgumentCompletions: (argumentPrefix: string) => {
-      const keys = ["strategy", "rotate", "quota", "fallback", "quiet"];
+      const keys = ["strategy", "rotate", "quota", "fallback", "quiet", "cooldown"];
       const keyValues: Record<string, string[]> = {
         strategy: ["round-robin", "random", "sticky"],
         rotate: ["true", "false"],
         quota: ["auto", "antigravity", "gemini-cli"],
         fallback: ["true", "false"],
         quiet: ["true", "false"],
+        cooldown: ["1000", "2000", "5000", "10000", "30000"],
       };
 
       const parts = argumentPrefix.split(/\s+/);
@@ -755,10 +914,11 @@ export default function (pi: ExtensionAPI) {
           `• rotate: ${config.rotateAccounts} (true | false)\n` +
           `• quota: ${config.geminiQuota} (auto | antigravity | gemini-cli)\n` +
           `• fallback: ${config.quotaFallback} (true | false)\n` +
-          `• quiet: ${config.quiet} (true | false)\n\n` +
+          `• quiet: ${config.quiet} (true | false)\n` +
+          `• cooldown: ${config.initialCooldownMs} ms\n\n` +
           `Saved in: ${CONFIG_PATH}\n` +
           `To modify, use: /antigravity-config <option>=<value>\n` +
-          `Example: /antigravity-config strategy=sticky rotate=false`,
+          `Example: /antigravity-config strategy=sticky rotate=false cooldown=2000`,
           "info"
         );
         return;
@@ -777,6 +937,11 @@ export default function (pi: ExtensionAPI) {
         else if (key === "geminiQuota" && ["auto", "antigravity", "gemini-cli"].includes(value)) config.geminiQuota = value as any;
         else if (key === "quotaFallback") config.quotaFallback = /^(1|true|yes|on)$/i.test(value);
         else if (key === "quiet") config.quiet = /^(1|true|yes|on)$/i.test(value);
+        else if (key === "initialCooldownMs") {
+          const parsed = parseInt(value, 10);
+          if (!isNaN(parsed) && parsed > 0) config.initialCooldownMs = parsed;
+          else ctx.ui.notify(`Invalid value for cooldown: ${value}`, "warning");
+        }
         else ctx.ui.notify(`Invalid value for ${rawKey}: ${value}`, "warning");
       }
       await writeConfig(config);
@@ -786,9 +951,78 @@ export default function (pi: ExtensionAPI) {
         `• rotate: ${config.rotateAccounts}\n` +
         `• quota: ${config.geminiQuota}\n` +
         `• fallback: ${config.quotaFallback}\n` +
-        `• quiet: ${config.quiet}`,
+        `• quiet: ${config.quiet}\n` +
+        `• cooldown: ${config.initialCooldownMs} ms`,
         "info"
       );
     },
   });
+  pi.registerCommand("antigravity-switch", {
+    description: "Switch the active Antigravity account. Usage: /antigravity-switch <index_or_email>",
+    getArgumentCompletions: async (argumentPrefix: string) => {
+      const s = await readAccounts();
+      const options = s.accounts.map((a, i) => ({
+        value: a.email || String(i + 1),
+        label: a.email || `Account ${i + 1}`,
+        description: `Switch to ${a.email || `Account ${i + 1}`}`,
+      }));
+      return options.filter(o => o.value.startsWith(argumentPrefix));
+    },
+    handler: async (args, ctx) => {
+      const trimmed = args.trim();
+      if (!trimmed) {
+        ctx.ui.notify("Please specify an account email or index to switch to. Example: /antigravity-switch 1", "warning");
+        return;
+      }
+      await mutateAccounts((s) => {
+        let index = -1;
+        const parsedIndex = parseInt(trimmed, 10);
+        if (!isNaN(parsedIndex)) {
+          index = parsedIndex - 1;
+        } else {
+          index = s.accounts.findIndex(a => a.email === trimmed);
+        }
+        if (index < 0 || index >= s.accounts.length) {
+          throw new Error(`Account "${trimmed}" not found.`);
+        }
+        s.activeIndex = index;
+        s.activeIndexByFamily = { claude: index, gemini: index };
+      });
+      const s = await readAccounts();
+      const activeAccount = s.accounts[s.activeIndex ?? 0];
+      ctx.ui.notify(`Successfully switched active account to: ${activeAccount?.email || `Account ${(s.activeIndex ?? 0) + 1}`}`, "info");
+    }
+  });
 }
+
+export {
+  CLIENT_ID,
+  CLIENT_SECRET,
+  REDIRECT_URI,
+  SCOPES,
+  ACCOUNTS_PATH,
+  CONFIG_PATH,
+  DEFAULT_PROJECT_ID,
+  ENDPOINTS,
+  readAccounts,
+  writeAccounts,
+  mutateAccounts,
+  readConfig,
+  writeConfig,
+  isGeminiModel,
+  quotaStylesFor,
+  endpointsFor,
+  headersFor,
+  accountOrder,
+  markAccountSuccess,
+  markAccountFailure,
+  refreshAccess,
+  doRefresh,
+  effectiveProject,
+  resolveActualModel,
+  patchedEffectiveModel,
+  patchPreparedModel,
+  thinkingConfig,
+  buildRequestBody,
+  normalizeAntigravityUserAgent
+};

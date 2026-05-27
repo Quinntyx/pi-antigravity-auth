@@ -36,10 +36,11 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test:list-models": "PI_SKIP_VERSION_CHECK=1 pi --no-extensions -e . --list-models antigravity",
-    "test:smoke": "PI_SKIP_VERSION_CHECK=1 pi --no-extensions -e . --provider antigravity --model gemini-3.5-flash-preview --no-builtin-tools -p 'Say ok in one word'"
+    "test:smoke": "PI_SKIP_VERSION_CHECK=1 pi --no-extensions -e . --provider antigravity --model gemini-3.1-pro-low --no-builtin-tools -p 'Say ok in one word'",
+    "proxy": "npx esbuild extensions/antigravity-auth/proxy.ts --bundle --platform=node --format=esm --target=node22 --outfile=dist/proxy.js --external:proper-lockfile && node dist/proxy.js"
   },
   "dependencies": {
-    "opencode-antigravity-auth": "^1.6.0",
+    "opencode-antigravity-auth": "^1.6.5-beta.0",
     "proper-lockfile": "^4.1.2"
   },
   "peerDependencies": {

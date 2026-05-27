@@ -87,22 +87,27 @@ pi --list-models antigravity
 
 | Model | Notes |
 |---|---|
-| `gemini-3.5-pro-high` | Antigravity quota |
-| `gemini-3.5-pro-low` | Antigravity quota |
-| `gemini-3.5-flash` | Antigravity quota |
+| `gemini-3.5-flash-high` | Antigravity quota |
+| `gemini-3.5-flash-medium` | Antigravity quota |
+| `gemini-3.1-pro-high` | Antigravity quota |
+| `gemini-3.1-pro-low` | Antigravity quota |
+| `gemini-3-flash` | Antigravity quota |
 | `claude-sonnet-4-6-thinking` | Antigravity quota |
 | `claude-opus-4-6-thinking` | Antigravity quota |
 | `gpt-oss-120b-medium` | Antigravity quota |
-| `gemini-3.5-pro-preview` | Gemini CLI quota |
-| `gemini-3.5-flash-preview` | Gemini CLI quota |
-| `gemini-cli-3.5-pro-preview` | Gemini CLI quota |
-| `gemini-cli-3.5-flash-preview` | Gemini CLI quota |
+| `gemini-3-pro-preview` | Gemini CLI quota |
+| `gemini-3.1-pro-preview` | Gemini CLI quota |
+| `gemini-3-flash-preview` | Gemini CLI quota |
+| `gemini-cli-3-pro-preview` | Gemini CLI quota |
+| `gemini-cli-3.1-pro-preview` | Gemini CLI quota |
+| `gemini-cli-3-flash-preview` | Gemini CLI quota |
 
 ### Model Variants
 Variants let you change thinking mode/level per model.
 ```bash
-pi --provider antigravity --model gemini-3.5-pro-high
-pi --provider antigravity --model gemini-3.5-pro-low
+pi --provider antigravity --model gemini-3.5-flash-high
+pi --provider antigravity --model gemini-3.5-flash-medium
+pi --provider antigravity --model gemini-3.1-pro-high
 pi --provider antigravity --model claude-opus-4-6-thinking
 ```
 
