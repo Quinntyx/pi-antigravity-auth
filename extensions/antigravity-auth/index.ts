@@ -25,6 +25,7 @@ import { dirname, join } from "node:path";
 import { randomBytes, createHash } from "node:crypto";
 import { prepareAntigravityRequest, transformAntigravityResponse } from "opencode-antigravity-auth/dist/src/plugin/request.js";
 import { checkAccountsQuota } from "opencode-antigravity-auth/dist/src/plugin/quota.js";
+import { toGeminiSchema } from "./gemini-schema.js";
 import {
   ANTIGRAVITY_CLIENT_ID,
   ANTIGRAVITY_CLIENT_SECRET,
@@ -304,19 +305,9 @@ function toContents(model: Model<any>, context: Context) {
   }
   return contents;
 }
-function cleanSchema(x: any): any {
-  if (!x || typeof x !== "object") return x;
-  if (Array.isArray(x)) return x.map(cleanSchema);
-  const out: any = {};
-  for (const [k, v] of Object.entries(x)) {
-    if (["$schema", "$id", "$defs", "definitions"].includes(k)) continue;
-    out[k] = cleanSchema(v);
-  }
-  return out;
-}
 function toTools(context: Context) {
   if (!context.tools?.length) return undefined;
-  return [{ functionDeclarations: context.tools.map((t) => ({ name: t.name, description: t.description, parameters: cleanSchema(t.parameters) || { type: "object", properties: {} } })) }];
+  return [{ functionDeclarations: context.tools.map((t) => ({ name: t.name, description: t.description, parameters: toGeminiSchema(t.parameters) || { type: "object", properties: {} } })) }];
 }
 function resolveActualModel(id: string) {
   return id

@@ -3,6 +3,7 @@ import { promises as fs } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { prepareAntigravityRequest, transformAntigravityResponse } from "opencode-antigravity-auth/dist/src/plugin/request.js";
 import { getRandomizedHeaders } from "opencode-antigravity-auth/dist/src/constants.js";
+import { toGeminiSchema } from "./gemini-schema.js";
 import {
   readAccounts,
   readConfig,
@@ -32,16 +33,6 @@ function mapFinish(reason: string): string | null {
   return "stop";
 }
 
-function cleanSchema(x: any): any {
-  if (!x || typeof x !== "object") return x;
-  if (Array.isArray(x)) return x.map(cleanSchema);
-  const out: any = {};
-  for (const [k, v] of Object.entries(x)) {
-    if (["$schema", "$id", "$defs", "definitions"].includes(k)) continue;
-    out[k] = cleanSchema(v);
-  }
-  return out;
-}
 
 function translateOpenAITools(openAITools: any[]) {
   if (!openAITools || openAITools.length === 0) return undefined;
@@ -53,7 +44,7 @@ function translateOpenAITools(openAITools: any[]) {
       return {
         name: t.function.name,
         description: t.function.description || "",
-        parameters: cleanSchema(parameters)
+        parameters: toGeminiSchema(parameters)
       };
     });
 
