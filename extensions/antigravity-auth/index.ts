@@ -333,10 +333,10 @@ function resolveActualModel(id: string) {
 }
 function patchedEffectiveModel(requested: string, style: QuotaStyle) {
   const normalized = requested.replace(/^antigravity-/i, "");
-  if (style === "antigravity" && /^gemini-3\.5-flash-(low|medium|high)$/i.test(normalized)) {
+  if (style === "antigravity" && /^gemini-3\.(5|6)-flash-(low|medium|high|tiered)$/i.test(normalized)) {
     return normalized;
   }
-  if (style === "gemini-cli" && /^gemini-3\.5-flash-(low|medium|high)$/i.test(normalized)) {
+  if (style === "gemini-cli" && /^gemini-3\.(5|6)-flash-(low|medium|high|tiered)$/i.test(normalized)) {
     return "gemini-3-flash-preview";
   }
   return undefined;
@@ -351,7 +351,7 @@ function patchPreparedModel(prepared: any, effectiveModel?: string) {
     const body = JSON.parse(prepared.init.body);
     body.model = effectiveModel;
     if (body.request?.sessionId && typeof body.request.sessionId === "string") {
-      body.request.sessionId = body.request.sessionId.replace(/:gemini-3\.5-flash(-low|-medium|-high)?:/i, `:${effectiveModel}:`);
+      body.request.sessionId = body.request.sessionId.replace(/:gemini-3\.(5|6)-flash(-low|-medium|-high|-tiered)?:/i, `:${effectiveModel}:`);
     }
     prepared.init.body = JSON.stringify(body);
     prepared.effectiveModel = effectiveModel;
@@ -634,6 +634,10 @@ async function exchange(code: string, verifier: string): Promise<OAuthCredential
 
 const models = [
   // Antigravity model picker models
+  { id: "gemini-3.6-flash-high", name: "Gemini 3.6 Flash (High)", reasoning: true, contextWindow: 1048576, maxTokens: 65536 },
+  { id: "gemini-3.6-flash-medium", name: "Gemini 3.6 Flash (Medium)", reasoning: true, contextWindow: 1048576, maxTokens: 65536 },
+  { id: "gemini-3.6-flash-low", name: "Gemini 3.6 Flash (Low)", reasoning: true, contextWindow: 1048576, maxTokens: 65536 },
+  { id: "gemini-3.6-flash-tiered", name: "Gemini 3.6 Flash (Tiered)", reasoning: true, contextWindow: 1048576, maxTokens: 65536 },
   { id: "gemini-3.5-flash-high", name: "Gemini 3.5 Flash (High)", reasoning: true, contextWindow: 1048576, maxTokens: 65536 },
   { id: "gemini-3.5-flash-medium", name: "Gemini 3.5 Flash (Medium)", reasoning: true, contextWindow: 1048576, maxTokens: 65536 },
   { id: "gemini-3.5-flash-low", name: "Gemini 3.5 Flash (Low)", reasoning: true, contextWindow: 1048576, maxTokens: 65536 },

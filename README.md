@@ -87,6 +87,10 @@ pi --list-models antigravity
 
 | Model | Notes |
 |---|---|
+| `gemini-3.6-flash-high` | Antigravity quota |
+| `gemini-3.6-flash-medium` | Antigravity quota |
+| `gemini-3.6-flash-low` | Antigravity quota |
+| `gemini-3.6-flash-tiered` | Antigravity quota |
 | `gemini-3.5-flash-high` | Antigravity quota |
 | `gemini-3.5-flash-medium` | Antigravity quota |
 | `gemini-3.1-pro-high` | Antigravity quota |
@@ -105,6 +109,8 @@ pi --list-models antigravity
 ### Model Variants
 Variants let you change thinking mode/level per model.
 ```bash
+pi --provider antigravity --model gemini-3.6-flash-tiered
+pi --provider antigravity --model gemini-3.6-flash-high
 pi --provider antigravity --model gemini-3.5-flash-high
 pi --provider antigravity --model gemini-3.5-flash-medium
 pi --provider antigravity --model gemini-3.1-pro-high

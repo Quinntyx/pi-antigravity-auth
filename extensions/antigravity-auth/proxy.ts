@@ -162,6 +162,10 @@ const server = createServer(async (req, res) => {
     res.end(JSON.stringify({
       object: "list",
       data: [
+        { id: "gemini-3.6-flash-high", object: "model", created: 1784678400, owned_by: "google" },
+        { id: "gemini-3.6-flash-medium", object: "model", created: 1784678400, owned_by: "google" },
+        { id: "gemini-3.6-flash-low", object: "model", created: 1784678400, owned_by: "google" },
+        { id: "gemini-3.6-flash-tiered", object: "model", created: 1784678400, owned_by: "google" },
         { id: "gemini-3.5-flash-high", object: "model", created: 1716200000, owned_by: "google" },
         { id: "gemini-3.5-flash-medium", object: "model", created: 1716200000, owned_by: "google" },
         { id: "gemini-3.5-flash-low", object: "model", created: 1716200000, owned_by: "google" },
