@@ -377,6 +377,58 @@ function mapFinish(reason: string | undefined): "stop" | "length" | "toolUse" | 
   if (!reason || reason === "STOP") return "stop";
   return "error";
 }
+// Gemini finishReasons that are transient and worth retrying when the model
+// produced no usable output (only thinking, or nothing at all). Gemini 3.x
+// intermittently stops mid-turn after emitting only thoughts; a fresh attempt
+// usually succeeds.
+const RETRYABLE_FINISH_REASONS = new Set([
+  "OTHER",
+  "MALFORMED_FUNCTION_CALL",
+  "SAFETY",
+  "RECITATION",
+  "BLOCKLIST",
+  "PROHIBITED_CONTENT",
+  "SPII",
+  "IMAGE_SAFETY",
+  "LANGUAGE",
+]);
+const MAX_RETRY_ATTEMPTS = 2;
+
+function hasUsableContent(output: AssistantMessage): boolean {
+  return output.content.some(
+    (b: any) => (b.type === "text" && typeof b.text === "string" && b.text.trim()) || b.type === "toolCall"
+  );
+}
+
+function describeGeminiStop(state: any): string {
+  const reason = state.finishReason;
+  const pf = state.promptFeedback;
+  const parts: string[] = [];
+  if (reason && reason !== "STOP" && reason !== "MAX_TOKENS") parts.push(`Gemini stopped with finishReason ${reason}`);
+  if (pf) {
+    if (pf.blockReason) parts.push(`prompt blocked: ${pf.blockReason}`);
+    if (Array.isArray(pf.safetyRatings)) {
+      const blocked = pf.safetyRatings.filter((r: any) => r.blocked).map((r: any) => r.category);
+      if (blocked.length) parts.push(`safety blocked: ${blocked.join(", ")}`);
+    }
+  }
+  if (state.candidateError) {
+    const ce = state.candidateError;
+    parts.push(typeof ce === "string" ? ce : ce?.message || JSON.stringify(ce));
+  }
+  return parts.join("; ") || "Gemini stopped without producing usable output";
+}
+
+// Reset the live partial message and parse state so a retry starts clean.
+// Safe because the only blocks streamed so far were thinking (hidden/ephemeral);
+// no text or toolCall has reached the model-facing content yet.
+function resetForRetry(output: AssistantMessage, state: any): void {
+  output.content = [];
+  state.current = undefined;
+  state.finishReason = undefined;
+  state.promptFeedback = undefined;
+  state.candidateError = undefined;
+}
 function pushText(stream: any, output: AssistantMessage, state: any, delta: string, isThinking: boolean, signature?: string) {
   if (!delta) return;
   const blocks = output.content as any[];
@@ -418,7 +470,12 @@ function handleChunk(stream: any, output: AssistantMessage, state: any, chunk: a
       stream.push({ type: "toolcall_end", contentIndex: idx, toolCall: tc, partial: output });
     }
   }
-  if (cand?.finishReason) output.stopReason = output.content.some((b: any) => b.type === "toolCall") ? "toolUse" : mapFinish(cand.finishReason);
+  if (cand?.finishReason) {
+    state.finishReason = cand.finishReason;
+    if (cand.finishReason !== "STOP" && cand.finishReason !== "MAX_TOKENS") state.candidateError = cand.error || state.candidateError;
+    output.stopReason = output.content.some((b: any) => b.type === "toolCall") ? "toolUse" : mapFinish(cand.finishReason);
+  }
+  if (chunk?.promptFeedback) state.promptFeedback = chunk.promptFeedback;
   const u = chunk?.usageMetadata;
   if (u) {
     output.usage.input = (u.promptTokenCount || 0) - (u.cachedContentTokenCount || 0);
@@ -498,6 +555,7 @@ function streamAntigravity(model: Model<any>, context: Context, options?: Simple
       const fakeInput = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(requested)}:streamGenerateContent`;
       const family = isGeminiModel(model.id) ? "gemini" : "claude";
       let lastError: any;
+      let retryAttempts = 0;
       for (const style of quotaStylesFor(model.id, config)) {
         let isFirstAttempt = true;
         for (const accountIndex of accountOrder(storage, `${family}:${style}`, config)) {
@@ -543,12 +601,26 @@ function streamAntigravity(model: Model<any>, context: Context, options?: Simple
                 throw lastError;
               }
               await streamSse(transformed, stream, output, state, options?.signal);
+              // Retry transient Gemini stop reasons (OTHER, MALFORMED_FUNCTION_CALL,
+              // SAFETY, ...) when the model produced no usable text or tool call.
+              if (
+                state.finishReason &&
+                RETRYABLE_FINISH_REASONS.has(state.finishReason) &&
+                !hasUsableContent(output) &&
+                retryAttempts < MAX_RETRY_ATTEMPTS
+              ) {
+                retryAttempts += 1;
+                lastError = new Error(describeGeminiStop(state));
+                resetForRetry(output, state);
+                continue; // next endpoint/account
+              }
               await mutateAccounts((s) => {
                 const idx = s.accounts.findIndex(x => x.email === account.email);
                 if (idx >= 0) markAccountSuccess(s, `${family}:${style}`, idx, config);
               });
               endCurrent(stream, output, state);
               if (output.content.some((b: any) => b.type === "toolCall")) output.stopReason = "toolUse";
+              if (output.stopReason === "error") output.errorMessage = describeGeminiStop(state);
               stream.push({ type: "done", reason: output.stopReason as any, message: output });
               stream.end();
               return;
