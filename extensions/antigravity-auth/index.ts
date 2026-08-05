@@ -3,6 +3,7 @@ import type {
   SessionStartEvent,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { lock } from "proper-lockfile";
 import {
   calculateCost,
@@ -42,8 +43,8 @@ const REDIRECT_URI = process.env.PI_ANTIGRAVITY_REDIRECT_URI || ANTIGRAVITY_REDI
 const SCOPES = ANTIGRAVITY_SCOPES;
 const ANTIGRAVITY_PLUGIN_VERSION = process.env.PI_ANTIGRAVITY_PLUGIN_VERSION || "1.25.0";
 setAntigravityVersion(ANTIGRAVITY_PLUGIN_VERSION);
-const ACCOUNTS_PATH = join(homedir(), ".pi", "agent", "antigravity-accounts.json");
-const CONFIG_PATH = join(homedir(), ".pi", "agent", "antigravity.json");
+const ACCOUNTS_PATH = join(getAgentDir(), "antigravity-accounts.json");
+const CONFIG_PATH = join(getAgentDir(), "antigravity.json");
 const OPENCODE_ACCOUNTS_PATH = join(homedir(), ".config", "opencode", "antigravity-accounts.json");
 const DEFAULT_PROJECT_ID = "rising-fact-p41fc";
 const ENDPOINTS = [

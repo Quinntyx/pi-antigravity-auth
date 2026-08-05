@@ -121,10 +121,14 @@ pi --provider antigravity --model claude-opus-4-6-thinking
 
 ## Configuration & Usage
 
-All configuration settings are saved in:
+All configuration settings are saved in the Pi agent directory:
 ```text
-~/.pi/agent/antigravity.json
+$(pi agent dir)/antigravity.json
 ```
+
+The agent directory is resolved with Pi's own `getAgentDir()`: `$PI_CODING_AGENT_DIR` if set,
+otherwise `~/.pi/agent`. Account storage lives alongside it as `antigravity-accounts.json`.
+Run `/antigravity-config` with no arguments to see the exact paths in use.
 
 ### Configuration Commands
 
@@ -160,7 +164,7 @@ The extension supports fine-tuned control over account cycling and quota fallbac
 
 ### Account Operations
 
-- **Import from Opencode**: Copies `~/.config/opencode/antigravity-accounts.json` to `~/.pi/agent/antigravity-accounts.json` if you already use `opencode-antigravity-auth`.
+- **Import from Opencode**: Copies `~/.config/opencode/antigravity-accounts.json` to `$(pi agent dir)/antigravity-accounts.json` if you already use `opencode-antigravity-auth`.
   ```text
   /antigravity-import-opencode
   ```
